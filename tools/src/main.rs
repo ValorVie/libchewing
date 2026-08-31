@@ -43,6 +43,9 @@ fn main() -> Result<()> {
             flags::Lm::Eval(args) => {
                 lm::eval(&args.search_path, &args.model_bin, args.alpha, args.verbose)?;
             }
+            flags::Lm::Clean => {
+                lm::clean()?;
+            }
             flags::Lm::Compile(args) => {
                 lm::compile_lm(&args.lm_arpa, &args.words_txt, &args.output)?;
             }

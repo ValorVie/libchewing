@@ -5,7 +5,7 @@ use std::{
     path::Path,
 };
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 pub(crate) fn prepare(tsi_csv: &Path, rare_csv: &Path) -> Result<()> {
     let mut rare_map = HashMap::new();
@@ -47,11 +47,13 @@ pub(crate) fn prepare(tsi_csv: &Path, rare_csv: &Path) -> Result<()> {
     for io in lock.lines() {
         let line = io?;
         for part in line.split_whitespace() {
-            if part == "，" {
-                print!("{} ", part);
-            } else {
-                let bopomofo = bopomofo_map.get(part).context("load bopomofo")?;
-                print!("{} ", bopomofo);
+            match bopomofo_map.get(part) {
+                Some(bopomofo) => {
+                    print!("{} ", bopomofo);
+                }
+                None => {
+                    print!("{} ", part);
+                }
             }
         }
         println!("");

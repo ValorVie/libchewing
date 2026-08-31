@@ -83,11 +83,13 @@ pub(crate) fn eval(search_path: &str, model_bin: &str, alpha: f64, verbose: bool
                     let mut comp = Composition::new();
 
                     for part in input.split_whitespace() {
-                        if part == "，" {
-                            comp.push(Symbol::Grapheme(String::from("，")));
-                        } else {
-                            let syl: Syllable = part.parse().unwrap();
-                            comp.push(Symbol::Syllable(syl));
+                        match part.parse::<Syllable>() {
+                            Ok(syl) => {
+                                comp.push(Symbol::Syllable(syl));
+                            }
+                            Err(_) => {
+                                comp.push(Symbol::Grapheme(String::from(part)));
+                            }
                         }
                     }
 
@@ -110,9 +112,11 @@ pub(crate) fn eval(search_path: &str, model_bin: &str, alpha: f64, verbose: bool
                             .send((chars, dist))
                             .expect("unable to send result");
                     } else {
-                        println!("Failed to convert:");
-                        println!("  {}", input);
-                        println!("  {}", answer);
+                        if verbose {
+                            println!("Failed to convert:");
+                            println!("  {}", input);
+                            println!("  {}", answer);
+                        }
                     }
                 }
             });
