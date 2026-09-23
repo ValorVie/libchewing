@@ -1,3 +1,4 @@
+use std::io;
 use std::io::Read;
 use std::io::Write;
 
@@ -77,6 +78,13 @@ impl<R: Read> BareDecoder<R> {
             let mut buf = vec![0; len];
             self.reader.read_exact(&mut buf)?;
             Ok(buf)
+        })
+    }
+    pub(crate) fn skip_data(&mut self) -> Result<(), BareError> {
+        expect_error("Failed to decode data from buffer", || {
+            let len = self.read_uint()?;
+            io::copy(&mut self.reader.by_ref().take(len), &mut io::sink())?;
+            Ok(())
         })
     }
     pub(crate) fn read_data_exact(&mut self, len: usize) -> Result<Vec<u8>, BareError> {

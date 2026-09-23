@@ -102,11 +102,7 @@ impl StringTable {
             }
             let version = decoder.read_uint()?;
             if version != 0 {
-                bail!("Unknown file version");
-            }
-            let flags = decoder.read_u32()?;
-            if flags != 0 {
-                bail!("Unknown flags");
+                bail!("Incompatible format: {version}, expected: 0");
             }
             let num_keys = decoder.read_u32()? as usize;
             let num_buckets = decoder.read_u32()? as usize;
@@ -115,6 +111,12 @@ impl StringTable {
             let mut displacements = Vec::with_capacity(displacements_len as usize);
             for _ in 0..displacements_len {
                 displacements.push(decoder.read_u16()?);
+            }
+            let num_extensions = decoder.read_uint()?;
+            // Ignore unknown extensions
+            for _ in 0..num_extensions {
+                let _tag = decoder.read_u32()?;
+                let _data = decoder.skip_data()?;
             }
             let chd = Chd {
                 num_keys,
@@ -222,8 +224,6 @@ impl StringTableBuilder {
             encoder.write_data_exact(b"CHSW")?;
             // Write file version
             encoder.write_uint(0)?;
-            // Write flags
-            encoder.write_u32(0)?;
             // Write num_keys
             encoder.write_u32(chd.num_keys as u32)?;
             // Write num_buckets
@@ -235,6 +235,8 @@ impl StringTableBuilder {
             for d in &chd.displacements {
                 encoder.write_u16(*d)?;
             }
+            // Write 0 extensions
+            encoder.write_uint(0)?;
             // Write words
             let size: usize = words.iter().map(|s| s.len() + 1).sum();
             encoder.write_uint(size as u64)?;

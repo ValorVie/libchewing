@@ -128,11 +128,13 @@ impl StaticDict {
             }
             let version = decoder.read_uint()?;
             if version != 0 {
-                bail!("Unknown file version");
+                bail!("Incompatible file format: {version}, expected: 0");
             }
-            let flags = decoder.read_u32()?;
-            if flags != 0 {
-                bail!("Unknown flags");
+            let num_extensions = decoder.read_uint()?;
+            // Ignore all unknown extensions
+            for _ in 0..num_extensions {
+                let _tag = decoder.read_u32()?;
+                let _data = decoder.skip_data()?;
             }
             let index = decoder.read_data()?.into_boxed_slice();
             let words = decoder.read_data()?.into_boxed_slice();
@@ -351,8 +353,8 @@ impl StaticDictBuilder {
             encoder.write_data_exact(b"CHSD")?;
             // Write file version
             encoder.write_uint(0)?;
-            // Write flags
-            encoder.write_u32(0)?;
+            // Write 0 extensions
+            encoder.write_uint(0)?;
             // Write index
             encoder.write_data(&dict_encoder.into_inner())?;
             // Write words
@@ -420,10 +422,10 @@ mod test {
 
         assert_eq!(
             &[
-                67, 72, 83, 68, 0, 0, 0, 0, 0, 72, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 1, 0, 4, 34,
-                4, 0, 0, 0, 3, 0, 28, 40, 0, 0, 0, 0, 3, 0, 0, 0, 3, 0, 0, 0, 3, 0, 0, 0, 7, 0, 0,
-                0, 1, 0, 204, 0, 8, 0, 0, 0, 1, 0, 4, 34, 6, 0, 0, 0, 3, 0, 0, 0, 9, 0, 0, 0, 3, 0,
-                0, 0, 12, 2, 0, 0, 1, 0, 0, 4, 0, 0, 3, 0, 0
+                67, 72, 83, 68, 0, 0, 72, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 1, 0, 4, 34, 4, 0, 0,
+                0, 3, 0, 28, 40, 0, 0, 0, 0, 3, 0, 0, 0, 3, 0, 0, 0, 3, 0, 0, 0, 7, 0, 0, 0, 1, 0,
+                204, 0, 8, 0, 0, 0, 1, 0, 4, 34, 6, 0, 0, 0, 3, 0, 0, 0, 9, 0, 0, 0, 3, 0, 0, 0,
+                12, 2, 0, 0, 1, 0, 0, 4, 0, 0, 3, 0, 0
             ],
             buf.as_slice()
         );

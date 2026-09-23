@@ -1,3 +1,8 @@
+type Extension struct {
+    tag: u32,
+    payload: data
+}
+
 # static_words.bin
 # ===============
 # CHD perfect hashed words list for quick two way string to word_id lookup
@@ -16,11 +21,11 @@ type StaticWordsFileV1 struct {
 }
 
 type StaticWordsHeader {
-    flags: u32
     num_keys: u32,
     num_buckets: u32,
     seed: u32,
     displacements: list<u16>,
+    extensions: list<Extension>,
 }
 
 # static_dict.bin
@@ -41,7 +46,7 @@ type StaticDictFileV1 struct {
 }
 
 type StaticDictHeader struct {
-    flags: u32
+    extensions: list<Extension>,
 }
 
 type StaticDictIndex struct {
@@ -79,11 +84,11 @@ type StaticLMFileV1 struct {
 }
 
 type StaticLMHeaderV1 struct {
-    flags: u32
     num_unigrams: u32
     num_rows: u32
     num_values: u64
     col_deltas_len: u64
+    extensions: list<Extension>,
 }
 
 type StaticLMIndexV1 {
@@ -112,11 +117,11 @@ type HistoryDictFileV1 struct {
 }
 
 type HistoryDictHeader struct {
-    flags: u32
     half_life: u32
     generation: u64
     unigram_total: f64
     unigram_total_last_gen: u64
+    extensions: list<Extension>,
 }
 
 type HistoryDictUnigrams struct {

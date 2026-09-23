@@ -111,17 +111,19 @@ impl HistoryDict {
             // Read HistoryDictFile union version
             let version = decoder.read_uint()?;
             if version != 0 {
-                bail!("Unknown file version");
-            }
-            // Read HistoryDictHeader flags
-            let flags = decoder.read_u32()?;
-            if flags != 0 {
-                bail!("Unknown header flags");
+                bail!("Incompatible file format: {version}, expected: 0");
             }
             let half_life = decoder.read_u32()?;
             let generation = decoder.read_u64()?;
             let unigram_total = decoder.read_f64()?;
             let unigram_total_last_gen = decoder.read_u64()?;
+
+            let num_extensions = decoder.read_uint()?;
+            // Ignore all unknown extensions
+            for _ in 0..num_extensions {
+                let _tag = decoder.read_u32()?;
+                let _data = decoder.skip_data()?;
+            }
 
             let word_count = decoder.read_uint()? as u32;
             let mut file_wid_map = BTreeMap::new();
@@ -209,12 +211,12 @@ impl HistoryDict {
             encoder.write_data_exact(b"CHHD")?;
             // Write HistoryDictFile union version
             encoder.write_uint(0)?;
-            // Write HistoryDictHeader flags
-            encoder.write_u32(0)?;
             encoder.write_u32(lock.half_life)?;
             encoder.write_u64(lock.generation)?;
             encoder.write_f64(lock.unigram_total)?;
             encoder.write_u64(lock.unigram_total_last_gen)?;
+            // Write 0 extensions
+            encoder.write_uint(0)?;
 
             let g = lock.generation;
             let h = lock.half_life;

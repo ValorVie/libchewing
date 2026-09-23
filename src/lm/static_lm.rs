@@ -17,7 +17,6 @@ use std::{
     sync::Arc,
 };
 
-use log::warn;
 use scoped_error::{bail, expect_error, impl_context_error};
 
 use crate::{
@@ -148,18 +147,20 @@ impl StaticLm {
 
             let version = decoder.read_uint()?;
             if version != 0 {
-                bail!("Unknown file version {}", version);
-            }
-
-            let flags = decoder.read_u32()?;
-            if flags != 0 {
-                warn!("Unknown StaticLm flags {:x}", flags);
+                bail!("Incompatible file format: {version}, expected: 0");
             }
 
             let num_unigrams = decoder.read_u32()?;
             let num_rows = decoder.read_u32()?;
             let num_values = decoder.read_u64()?;
             let col_deltas_len = decoder.read_u64()?;
+
+            let num_extensions = decoder.read_uint()?;
+            // Ignore all unknown extensions
+            for _ in 0..num_extensions {
+                let _tag = decoder.read_u32()?;
+                let _data = decoder.skip_data()?;
+            }
 
             let unigrams: Box<[u8]> = decoder
                 .read_data_exact(num_unigrams as usize)?
@@ -454,8 +455,6 @@ impl StaticLmCompiler {
             encoder.write_data_exact(b"CHLM")?;
             // Version 0
             encoder.write_uint(0)?;
-            // Flags
-            encoder.write_u32(0)?;
             // num_unigrams
             encoder.write_u32(self.unigrams.len() as u32)?;
             // num_rows
@@ -464,6 +463,8 @@ impl StaticLmCompiler {
             encoder.write_u64(entry_count as u64)?;
             // col_deltas byte length
             encoder.write_u64(col_deltas_buf.len() as u64)?;
+            // Write extensions
+            encoder.write_uint(0)?;
 
             // unigrams
             for uni in q_unigrams {
