@@ -6,10 +6,7 @@ use std::{
     collections::{BTreeMap, btree_map::Entry},
     fs::File,
     io::{BufRead, BufReader, Write},
-    ops::{
-        Bound::{Excluded, Included},
-        Neg,
-    },
+    ops::Bound::{Excluded, Included},
     path::Path,
     sync::{Arc, RwLock},
 };
@@ -38,6 +35,8 @@ struct HistoryDictInner {
     bigrams: BTreeMap<(WordId, WordId), BiEntry>,
     unigram_total: f64,
     unigram_total_last_gen: u64,
+    /// prev_wid -> (total, last_gen)
+    bigram_totals: BTreeMap<WordId, (f64, u64)>,
 }
 
 #[derive(Debug)]
@@ -70,6 +69,7 @@ impl HistoryDict {
                 bigrams: BTreeMap::new(),
                 unigram_total: 0.0,
                 unigram_total_last_gen: 0,
+                bigram_totals: BTreeMap::new(),
             })),
         }
     }
@@ -175,6 +175,14 @@ impl HistoryDict {
                 };
             }
 
+            let mut bigram_totals = BTreeMap::new();
+            for ((prev_wid, _), e) in &bigrams {
+                let c_eff = effective_count_f64(e.count as f64, generation, e.last_gen, half_life);
+                let (t, lg) = bigram_totals.entry(*prev_wid).or_insert((0.0, 0));
+                *t += c_eff;
+                *lg = (*lg).max(e.last_gen);
+            }
+
             Ok(HistoryDict {
                 inner: Arc::new(RwLock::new(HistoryDictInner {
                     string_table,
@@ -184,6 +192,7 @@ impl HistoryDict {
                     bigrams,
                     unigram_total,
                     unigram_total_last_gen,
+                    bigram_totals,
                 })),
             })
         })
@@ -207,13 +216,16 @@ impl HistoryDict {
             encoder.write_f64(lock.unigram_total)?;
             encoder.write_u64(lock.unigram_total_last_gen)?;
 
+            let g = lock.generation;
+            let h = lock.half_life;
+
             // Prepare words section and file_wid mapping
             let mut wid_file_map = BTreeMap::new();
             let mut words = vec![];
             let mut uni_count = 0;
             for (_, entries) in &lock.unigrams {
                 for entry in entries {
-                    if lock.effective(entry.count, entry.last_gen) < Self::PRUNE_EPS {
+                    if effective_count(entry.count, g, entry.last_gen, h) < Self::PRUNE_EPS {
                         continue;
                     }
                     uni_count += 1;
@@ -228,7 +240,7 @@ impl HistoryDict {
             }
             let mut bi_count = 0;
             for ((prev_wid, wid), entry) in &lock.bigrams {
-                if lock.effective(entry.count, entry.last_gen) < Self::PRUNE_EPS {
+                if effective_count(entry.count, g, entry.last_gen, h) < Self::PRUNE_EPS {
                     continue;
                 }
                 bi_count += 1;
@@ -258,7 +270,7 @@ impl HistoryDict {
             encoder.write_uint(uni_count)?;
             for (syllables, entries) in &lock.unigrams {
                 for entry in entries {
-                    if lock.effective(entry.count, entry.last_gen) < Self::PRUNE_EPS {
+                    if effective_count(entry.count, g, entry.last_gen, h) < Self::PRUNE_EPS {
                         continue;
                     }
                     encoder.write_uint(syllables.len() as u64)?;
@@ -275,7 +287,7 @@ impl HistoryDict {
             // Write bigrams
             encoder.write_uint(bi_count)?;
             for ((prev_wid, wid), entry) in &lock.bigrams {
-                if lock.effective(entry.count, entry.last_gen) < Self::PRUNE_EPS {
+                if effective_count(entry.count, g, entry.last_gen, h) < Self::PRUNE_EPS {
                     continue;
                 }
                 let file_prev_wid = wid_file_map.get(prev_wid).expect("Corrupted state");
@@ -302,16 +314,18 @@ impl HistoryDict {
             .write()
             .expect("Unable to acquire HistoryDict writer lock");
         let wid = lock.string_table.intern(word);
-        let h = lock.half_life as f32;
+        let h = lock.half_life;
 
-        let dt = (g - lock.unigram_total_last_gen) as f32 / h;
-        lock.unigram_total = (lock.unigram_total * (-dt).exp2() as f64) + 1.0;
+        let uni_t = lock.unigram_total;
+        let uni_lg = lock.unigram_total_last_gen;
+
+        lock.unigram_total = effective_count_f64(uni_t, g, uni_lg, h) + 1.0;
         lock.unigram_total_last_gen = g;
 
         let uni_entries = lock.unigrams.entry(syllables.into()).or_default();
         if let Some(pos) = uni_entries.iter().position(|e| e.wid == wid) {
             let e = &mut uni_entries[pos];
-            e.count = e.count * ((g - e.last_gen) as f32 / h).neg().exp2() + 1.0;
+            e.count = effective_count(e.count, g, e.last_gen, h) + 1.0;
             e.last_gen = g;
         } else {
             uni_entries.push(UniEntry {
@@ -328,12 +342,12 @@ impl HistoryDict {
             .expect("Unable to acquire HistoryDict writer lock");
         let prev_wid = lock.string_table.intern(prev);
         let wid = lock.string_table.intern(word);
-        let h = lock.half_life as f32;
+        let h = lock.half_life;
 
         match lock.bigrams.entry((prev_wid, wid)) {
             Entry::Occupied(mut e) => {
                 let e = e.get_mut();
-                e.count = e.count * ((g - e.last_gen) as f32 / h).neg().exp2() + 1.0;
+                e.count = effective_count(e.count, g, e.last_gen, h) + 1.0;
                 e.last_gen = g;
             }
             Entry::Vacant(e) => {
@@ -341,6 +355,15 @@ impl HistoryDict {
                     count: 1.0,
                     last_gen: g,
                 });
+            }
+        }
+        match lock.bigram_totals.entry(prev_wid) {
+            Entry::Occupied(mut e) => {
+                let (t, lg) = *e.get();
+                e.insert((effective_count_f64(t, g, lg, h) + 1.0, g));
+            }
+            Entry::Vacant(e) => {
+                e.insert((1.0, g));
             }
         }
     }
@@ -357,6 +380,7 @@ impl HistoryDict {
         }
         lock.bigrams
             .retain(|(prev, cur), _| *prev != wid && *cur != wid);
+        lock.bigram_totals.remove(&wid);
     }
     // Return all words and their history based unigram log10 prob
     pub(crate) fn unigram(
@@ -368,12 +392,13 @@ impl HistoryDict {
             .inner
             .read()
             .expect("Unable to acquire HistoryDict reader lock");
-        let h = lock.half_life as f64;
+        let h = lock.half_life;
+        let uni_t = lock.unigram_total;
+        let g = lock.generation;
+        let uni_lg = lock.unigram_total_last_gen;
 
-        let total_now = (lock.unigram_total
-            * (-((lock.generation - lock.unigram_total_last_gen) as f64 / h)).exp2())
-            as f64;
-        let denominator = total_now + Self::UNIGRAM_THRESHOLD; // ε floor, see below
+        let total_now = effective_count_f64(uni_t, g, uni_lg, h);
+        let denominator = total_now + Self::UNIGRAM_THRESHOLD;
 
         match strategy {
             LookupStrategy::Standard => lock
@@ -384,8 +409,7 @@ impl HistoryDict {
                         .iter()
                         .map(|e| {
                             let wid = e.wid;
-                            let count = e.count as f64
-                                * ((lock.generation - e.last_gen) as f64 / h).neg().exp2();
+                            let count = effective_count(e.count, g, e.last_gen, h);
                             let logprob10 = (count as f64 / denominator).log10();
                             (wid, logprob10)
                         })
@@ -402,8 +426,7 @@ impl HistoryDict {
                     .flat_map(|(_, entries)| {
                         entries.iter().map(|e| {
                             let wid = e.wid;
-                            let count = e.count as f64
-                                * ((lock.generation - e.last_gen) as f64 / h).neg().exp2();
+                            let count = effective_count(e.count, g, e.last_gen, h);
                             let logprob10 = (count as f64 / denominator).log10();
                             (wid, logprob10)
                         })
@@ -412,7 +435,7 @@ impl HistoryDict {
             }
         }
     }
-    /// Returns bigram pseudo probability in log10 space.
+    /// Returns bigram probability in log10 space.
     pub(crate) fn bigram(&self, prev_wid: WordId, wid: WordId) -> f64 {
         let lock = self
             .inner
@@ -421,17 +444,30 @@ impl HistoryDict {
         let Some(e) = lock.bigrams.get(&(prev_wid, wid)) else {
             return f64::NEG_INFINITY;
         };
-        let c = lock.effective(e.count, e.last_gen) as f64;
-        (c / (c + Self::BIGRAM_THRESHOLD)).log10()
+        let Some(&(t, t_lg)) = lock.bigram_totals.get(&prev_wid) else {
+            return f64::NEG_INFINITY;
+        };
+        let c_eff = effective_count(e.count, lock.generation, e.last_gen, lock.half_life) as f64;
+        let t_eff = effective_count_f64(t, lock.generation, t_lg, lock.half_life);
+        (c_eff / (t_eff + Self::BIGRAM_THRESHOLD)).log10()
     }
 }
 
-impl HistoryDictInner {
-    #[inline]
-    fn effective(&self, count: f32, last_gen: u64) -> f32 {
-        let dt = (self.generation - last_gen) as f32 / self.half_life as f32;
-        count * (-dt).exp2()
-    }
+/// Calculates the effective count using a decay function
+///
+/// # Parameters
+/// - count: number observed at last generation *lg*
+/// - g: current generation
+/// - lg: last seen generation
+/// - h: half-life
+fn effective_count(count: f32, g: u64, lg: u64, h: u32) -> f32 {
+    let dt = (g - lg) as f32 / h as f32;
+    count * (-dt).exp2()
+}
+
+fn effective_count_f64(count: f64, g: u64, lg: u64, h: u32) -> f64 {
+    let dt = (g - lg) as f64 / h as f64;
+    count * (-dt).exp2()
 }
 
 impl_context_error!(pub HistoryDictError);
@@ -602,7 +638,7 @@ mod tests {
         }
         let log10prob = hist.bigram(test, program);
         assert!(
-            (log10prob - -4.52).abs() < 1e-2,
+            (log10prob - -4.53).abs() < 1e-2,
             "log10prob = {}",
             log10prob
         );
