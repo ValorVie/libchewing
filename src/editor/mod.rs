@@ -222,8 +222,10 @@ impl Editor {
 
             let user_datadir = sp.user_versioned_path();
 
-            if let Some(vp) = &user_datadir {
-                fs::create_dir_all(vp)?;
+            if let Some(vp) = &user_datadir
+                && !vp.exists()
+            {
+                let _ = fs::create_dir_all(vp);
             }
 
             let mut user_dict_path = sp.find_user_file("user_dict.csv");
