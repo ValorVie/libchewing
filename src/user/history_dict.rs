@@ -55,7 +55,7 @@ struct BiEntry {
 impl HistoryDict {
     pub const HALF_LIFE: u32 = 50_000;
     pub const PRUNE_EPS: f32 = 0.25;
-    pub const UNIGRAM_THRESHOLD: f64 = 500_000.0;
+    pub const UNIGRAM_THRESHOLD: f64 = 100_000.0;
     pub const BIGRAM_THRESHOLD: f64 = 100_000.0;
 
     /// Returns an empty HistoryDict
@@ -494,7 +494,7 @@ mod tests {
         hist.observe_unigram(hist.new_gen(), test, "測試");
         let log10prob = hist.unigram(test, LookupStrategy::Standard)[0].1;
         assert!(
-            (log10prob - -5.69).abs() < 1e-2,
+            (log10prob - -5.00).abs() < 1e-2,
             "log10prob = {}",
             log10prob
         );
@@ -502,7 +502,7 @@ mod tests {
         hist.observe_unigram(hist.new_gen(), test, "測試");
         let log10prob = hist.unigram(test, LookupStrategy::Standard)[0].1;
         assert!(
-            (log10prob - -5.39).abs() < 1e-2,
+            (log10prob - -4.69).abs() < 1e-2,
             "log10prob = {}",
             log10prob
         );
@@ -510,7 +510,7 @@ mod tests {
         hist.observe_unigram(hist.new_gen(), test, "測試");
         let log10prob = hist.unigram(test, LookupStrategy::Standard)[0].1;
         assert!(
-            (log10prob - -5.22).abs() < 1e-2,
+            (log10prob - -4.52).abs() < 1e-2,
             "log10prob = {}",
             log10prob
         );
@@ -520,7 +520,7 @@ mod tests {
         }
         let log10prob = hist.unigram(test, LookupStrategy::Standard)[0].1;
         assert!(
-            (log10prob - -2.70).abs() < 1e-2,
+            (log10prob - -2.00).abs() < 1e-2,
             "log10prob = {}",
             log10prob
         );
@@ -541,7 +541,7 @@ mod tests {
         hist.observe_unigram(hist.new_gen(), test, "測試");
         let log10prob = hist.unigram(test, LookupStrategy::Standard)[0].1;
         assert!(
-            (log10prob - -5.69).abs() < 1e-2,
+            (log10prob - -5.00).abs() < 1e-2,
             "log10prob = {}",
             log10prob
         );
@@ -550,7 +550,7 @@ mod tests {
         }
         let log10prob = hist.unigram(test, LookupStrategy::Standard)[0].1;
         assert!(
-            (log10prob - -6.03).abs() < 1e-2,
+            (log10prob - -5.43).abs() < 1e-2,
             "log10prob = {}",
             log10prob
         );
@@ -664,7 +664,7 @@ mod tests {
         hist.observe_unigram(hist.new_gen(), test, "測試");
         let log10prob = hist.unigram(test, LookupStrategy::Standard)[0].1;
         assert!(
-            (log10prob - -5.69).abs() < 1e-2,
+            (log10prob - -5.00).abs() < 1e-2,
             "log10prob = {}",
             log10prob
         );
@@ -685,7 +685,7 @@ mod tests {
         let restored = HistoryDict::from_reader(buffer.as_slice(), st).unwrap();
         let log10prob = restored.unigram(test, LookupStrategy::Standard)[0].1;
         assert!(
-            (log10prob - -5.69).abs() < 1e-2,
+            (log10prob - -5.00).abs() < 1e-2,
             "log10prob = {}",
             log10prob
         );
@@ -720,7 +720,7 @@ mod tests {
         hist.observe_unigram(hist.new_gen(), test, "測試");
         let log10prob = hist.unigram(test, LookupStrategy::Standard)[0].1;
         assert!(
-            (log10prob - -5.69).abs() < 1e-2,
+            (log10prob - -5.00).abs() < 1e-2,
             "log10prob = {}",
             log10prob
         );
