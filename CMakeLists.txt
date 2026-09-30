@@ -178,7 +178,15 @@ corrosion_set_env_vars(chewing_capi
 )
 target_link_libraries(libchewing PRIVATE chewing_capi)
 if(BUILD_SHARED_LIBS)
-    if(CMAKE_C_COMPILER_ID MATCHES GNU|^Clang)
+    if(CMAKE_HOST_WIN32 AND CMAKE_C_COMPILER_ID MATCHES ^Clang)
+        # llvm-mingw target
+        target_link_options(libchewing
+            PRIVATE ${PROJECT_SOURCE_DIR}/capi/src/symbols-msvc.def
+        )
+        set_target_properties(libchewing PROPERTIES
+            LINK_DEPENDS ${PROJECT_SOURCE_DIR}/capi/src/symbols-msvc.def
+        )
+    elseif(CMAKE_C_COMPILER_ID MATCHES GNU|^Clang)
         target_link_options(libchewing
             PRIVATE LINKER:-version-script,${PROJECT_SOURCE_DIR}/capi/src/symbols-elf.map
             PRIVATE LINKER:--gc-sections
