@@ -155,3 +155,6 @@ contrib/test.sqlite3
 .build/
 .swiftpm/
 index-build/
+
+# direnv and nix
+.direnv/
