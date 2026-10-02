@@ -11,6 +11,7 @@ pkgs.mkShell {
     rust-analyzer
     cmake
     ninja
+    ncurses
     valgrind
   ];
 }
