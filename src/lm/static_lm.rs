@@ -86,6 +86,9 @@ pub struct StaticLm {
 
 #[derive(Debug)]
 struct StaticLmInner {
+    unigram_cb: Codebook,
+    bigram_cb: Codebook,
+
     /// Quantized unigram log-probabilities
     unigrams: Box<[u8]>,
 
@@ -118,6 +121,8 @@ impl StaticLm {
     pub fn new() -> StaticLm {
         StaticLm {
             inner: Arc::new(StaticLmInner {
+                unigram_cb: Codebook::uniform_default(UNIGRAM_LEVELS),
+                bigram_cb: Codebook::uniform_default(BIGRAM_LEVELS),
                 unigrams: Box::new([]),
                 row_index: Box::new([]),
                 values: Box::new([]),
@@ -154,6 +159,20 @@ impl StaticLm {
             let num_rows = decoder.read_u32()?;
             let num_values = decoder.read_u64()?;
             let col_deltas_len = decoder.read_u64()?;
+
+            let unigram_cb_len = decoder.read_uint()?;
+            let mut points = Vec::with_capacity(unigram_cb_len as usize);
+            for _ in 0..unigram_cb_len {
+                points.push(decoder.read_f64()?);
+            }
+            let unigram_cb = Codebook::from(points);
+
+            let bigram_cb_len = decoder.read_uint()?;
+            let mut points = Vec::with_capacity(bigram_cb_len as usize);
+            for _ in 0..bigram_cb_len {
+                points.push(decoder.read_f64()?);
+            }
+            let bigram_cb = Codebook::from(points);
 
             let num_extensions = decoder.read_uint()?;
             // Ignore all unknown extensions
@@ -202,6 +221,8 @@ impl StaticLm {
 
             Ok(StaticLm {
                 inner: Arc::new(StaticLmInner {
+                    unigram_cb,
+                    bigram_cb,
                     unigrams,
                     row_index,
                     values,
@@ -229,7 +250,7 @@ impl StaticLm {
             .inner
             .unigrams
             .get(wid.0 as usize)
-            .map(|&q| unquantize_unigram(q))
+            .map(|&q| self.inner.unigram_cb.unquantize(q))
             .unwrap_or(f64::NEG_INFINITY);
         let floor = if matches!(wid.orig(), WordOrig::User) {
             Self::USER_FLOOR
@@ -257,7 +278,7 @@ impl StaticLm {
         cols.binary_search(&col)
             .ok()
             .map(|pos| vals[pos])
-            .map(|q| unquantize_bigram(q))
+            .map(|q| self.inner.bigram_cb.unquantize(q))
     }
 
     /// Lazy lookup: decode varints sequentially within the row.
@@ -287,7 +308,11 @@ impl StaticLm {
             offset += consumed;
 
             if abs_col == col {
-                return Some(unquantize_bigram(self.inner.values[entry_idx]));
+                return Some(
+                    self.inner
+                        .bigram_cb
+                        .unquantize(self.inner.values[entry_idx]),
+                );
             }
             // Since columns are sorted, we can stop early
             if abs_col > col {
@@ -385,16 +410,19 @@ impl StaticLmCompiler {
         expect_error("Failed to serialize StaticLm", || {
             let mut encoder = BareEncoder::new(writer);
 
+            let unigram_cb = Codebook::build(self.unigrams.iter().copied(), UNIGRAM_LEVELS);
+            let bigram_cb = Codebook::build(self.matrix.values().copied(), BIGRAM_LEVELS);
+
             let q_unigrams: Vec<u8> = self
                 .unigrams
                 .iter()
-                .map(|&log10_prob| quantize_unigram(log10_prob))
+                .map(|&log10_prob| unigram_cb.quantize(log10_prob))
                 .collect();
             let q_matrix: BTreeMap<(u32, u32), u8> = self
                 .matrix
                 .iter()
                 .map(|(&(w1, w2), &log10_prob)| {
-                    let quantized = quantize_bigram(log10_prob);
+                    let quantized = bigram_cb.quantize(log10_prob);
                     ((w1.0, w2.0), quantized)
                 })
                 .collect();
@@ -452,6 +480,18 @@ impl StaticLmCompiler {
             encoder.write_u64(entry_count as u64)?;
             // col_deltas byte length
             encoder.write_u64(col_deltas_buf.len() as u64)?;
+            // unigram codebook
+            let cb = unigram_cb.to_vec();
+            encoder.write_uint(cb.len() as u64)?;
+            for c in cb {
+                encoder.write_f64(c)?;
+            }
+            // bigram codebook
+            let cb = bigram_cb.to_vec();
+            encoder.write_uint(cb.len() as u64)?;
+            for c in cb {
+                encoder.write_f64(c)?;
+            }
             // Write extensions
             encoder.write_uint(0)?;
 
@@ -478,30 +518,86 @@ impl StaticLmCompiler {
     }
 }
 
-const MIN_LOGLOG: f64 = -0.3;
-const MAX_LOGLOG: f64 = 1.3;
-const UNI_LEVELS: f64 = 255.0;
-
-fn quantize_unigram(log10prob: f64) -> u8 {
-    let loglog = log10prob.neg().log10().clamp(MIN_LOGLOG, MAX_LOGLOG);
-    let q = ((loglog - MIN_LOGLOG) / (MAX_LOGLOG - MIN_LOGLOG) * UNI_LEVELS + 0.5) as i32;
-    q.clamp(0, 255) as u8
+#[derive(Debug, Clone)]
+struct Codebook {
+    points: Vec<f64>,
 }
 
-fn unquantize_unigram(q: u8) -> f64 {
-    let loglog = q as f64 / UNI_LEVELS * (MAX_LOGLOG - MIN_LOGLOG) + MIN_LOGLOG;
-    10.0_f64.powf(loglog).neg()
+// (-UNIGRAM_FLOOR as f64).log10(), the floor
+const MAX_LOGLOG: f64 = 1.30103;
+// log10(0.5), the useful top
+const MIN_LOGLOG: f64 = -0.30103;
+
+const BIGRAM_LEVELS: usize = 16;
+const UNIGRAM_LEVELS: usize = 256;
+
+impl Codebook {
+    fn uniform_default(n: usize) -> Codebook {
+        let (lo, hi) = (MIN_LOGLOG, MAX_LOGLOG);
+        let points = (0..n)
+            .map(|i| lo + (hi - lo) * i as f64 / (n as f64 - 1.0))
+            .collect();
+        Codebook { points }
+    }
+
+    fn from(points: Vec<f64>) -> Codebook {
+        Codebook { points }
+    }
+
+    fn build(log10probs: impl Iterator<Item = f64>, n: usize) -> Codebook {
+        let mut loglogs: Vec<f64> = log10probs
+            .map(to_loglog)
+            .map(|l| l.clamp(MIN_LOGLOG, MAX_LOGLOG))
+            .collect();
+        if loglogs.is_empty() {
+            return Codebook::uniform_default(n);
+        }
+        loglogs.sort_by(|a, b| a.total_cmp(b));
+        loglogs.dedup();
+
+        let min = loglogs[0];
+        let max = loglogs[loglogs.len() - 1];
+
+        let points = (0..n)
+            .map(|i| min + (max - min) * i as f64 / (n as f64 - 1.0))
+            .collect();
+        Codebook { points }
+    }
+
+    fn quantize(&self, log10prob: f64) -> u8 {
+        let x = to_loglog(log10prob);
+        let last = self.points.len() - 1;
+        if !x.is_finite() {
+            return if x < 0.0 { 0 } else { last as u8 };
+        }
+        let idx = self.points.partition_point(|&p| p < x);
+        match idx {
+            0 => 0,
+            i if i > last => last as u8,
+            i => {
+                let (a, b) = (i - 1, i);
+                if (x - self.points[a]).abs() <= (self.points[b] - x).abs() {
+                    a as u8
+                } else {
+                    b as u8
+                }
+            }
+        }
+    }
+
+    fn unquantize(&self, q: u8) -> f64 {
+        10.0_f64
+            .powf(self.points[(q as usize).min(self.points.len() - 1)])
+            .neg()
+    }
+
+    fn to_vec(&self) -> Vec<f64> {
+        self.points.clone()
+    }
 }
 
-fn quantize_bigram(log10prob: f64) -> u8 {
-    let loglog = log10prob.neg().log10().clamp(MIN_LOGLOG, MAX_LOGLOG);
-    let q = ((loglog - MIN_LOGLOG) / (MAX_LOGLOG - MIN_LOGLOG) * 15.0 + 0.5) as i32;
-    q.clamp(0, 15) as u8
-}
-
-fn unquantize_bigram(quantum: u8) -> f64 {
-    let loglog = (quantum as f64) / 15.0 * (MAX_LOGLOG - MIN_LOGLOG) + MIN_LOGLOG;
-    10.0_f64.powf(loglog).neg()
+fn to_loglog(log10prob: f64) -> f64 {
+    log10prob.neg().log10()
 }
 
 impl_context_error!(pub StaticLmError);
@@ -512,7 +608,7 @@ mod test {
     use crate::{
         lm::{
             StaticLmCompiler,
-            static_lm::{LoadMode, StaticLm, quantize_bigram, unquantize_bigram},
+            static_lm::{Codebook, LoadMode, StaticLm},
         },
         model::WordId,
     };
@@ -589,16 +685,18 @@ mod test {
     #[test]
     fn quantize_unquantize() {
         let e = 0.6;
-        assert!((0.0 - unquantize_bigram(quantize_bigram(0.0))).abs() < e);
-        assert!((-1.0 - unquantize_bigram(quantize_bigram(-1.0))).abs() < e);
-        assert!((-5.0 - unquantize_bigram(quantize_bigram(-5.0))).abs() < e);
-        assert!((-10.0 - unquantize_bigram(quantize_bigram(-10.0))).abs() < e);
+        let cb = Codebook::uniform_default(256);
+        assert!((0.0 - cb.unquantize(cb.quantize(0.0))).abs() < e);
+        assert!((-1.0 - cb.unquantize(cb.quantize(-1.0))).abs() < e);
+        assert!((-5.0 - cb.unquantize(cb.quantize(-5.0))).abs() < e);
+        assert!((-10.0 - cb.unquantize(cb.quantize(-10.0))).abs() < e);
     }
 
     #[test]
     fn quantize_roundtrip_error() {
+        let cb = Codebook::uniform_default(256);
         for i in 0..=255 {
-            let q = quantize_bigram(unquantize_bigram(i as u8));
+            let q = cb.quantize(cb.unquantize(i as u8));
             assert_eq!(q, i as u8);
         }
     }

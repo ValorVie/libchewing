@@ -1,5 +1,5 @@
 type Extension struct {
-    tag: u32,
+    tag: u32
     payload: data
 }
 
@@ -21,11 +21,11 @@ type StaticWordsFileV1 struct {
 }
 
 type StaticWordsHeader {
-    num_keys: u32,
-    num_buckets: u32,
-    seed: u32,
-    displacements: list<u16>,
-    extensions: list<Extension>,
+    num_keys: u32
+    num_buckets: u32
+    seed: u32
+    displacements: list<u16>
+    extensions: list<Extension>
 }
 
 # static_dict.bin
@@ -46,7 +46,7 @@ type StaticDictFileV1 struct {
 }
 
 type StaticDictHeader struct {
-    extensions: list<Extension>,
+    extensions: list<Extension>
 }
 
 type StaticDictIndex struct {
@@ -79,8 +79,8 @@ type StaticLMFileMagic struct {
 type StaticLMFile union {StaticLMFileV1}
 
 type StaticLMFileV1 struct {
-    header: StaticLMHeaderV1,
-    index: StaticLMIndexV1,
+    header: StaticLMHeaderV1
+    index: StaticLMIndexV1
 }
 
 type StaticLMHeaderV1 struct {
@@ -88,7 +88,9 @@ type StaticLMHeaderV1 struct {
     num_rows: u32
     num_values: u64
     col_deltas_len: u64
-    extensions: list<Extension>,
+    unigram_codebook: list<f64>  # unigram quantization codebook
+    bigram_codebook: list<f64>   # bigram quantization codebook
+    extensions: list<Extension>
 }
 
 type StaticLMIndexV1 {
@@ -110,10 +112,10 @@ type HistoryDictFileMagic struct {
 type HistoryDictFile union {HistoryDictFileV1}
 
 type HistoryDictFileV1 struct {
-    header: HistoryDictHeader,
-    words: HistoryDictWords,
-    unigrams: HistoryDictUnigrams,
-    bigrams: HistoryDictBigrams,
+    header: HistoryDictHeader
+    words: HistoryDictWords
+    unigrams: HistoryDictUnigrams
+    bigrams: HistoryDictBigrams
 }
 
 type HistoryDictHeader struct {
@@ -121,7 +123,7 @@ type HistoryDictHeader struct {
     generation: u64
     unigram_total: f64
     unigram_total_last_gen: u64
-    extensions: list<Extension>,
+    extensions: list<Extension>
 }
 
 type HistoryDictUnigrams struct {
