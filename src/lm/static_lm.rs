@@ -229,7 +229,7 @@ impl StaticLm {
             .inner
             .unigrams
             .get(wid.0 as usize)
-            .map(|&q| unquantize_log_prob(q))
+            .map(|&q| unquantize_unigram(q))
             .unwrap_or(f64::NEG_INFINITY);
         let floor = if matches!(wid.orig(), WordOrig::User) {
             Self::USER_FLOOR
@@ -257,7 +257,7 @@ impl StaticLm {
         cols.binary_search(&col)
             .ok()
             .map(|pos| vals[pos])
-            .map(|q| unquantize_log_prob(q))
+            .map(|q| unquantize_bigram(q))
     }
 
     /// Lazy lookup: decode varints sequentially within the row.
@@ -287,7 +287,7 @@ impl StaticLm {
             offset += consumed;
 
             if abs_col == col {
-                return Some(unquantize_log_prob(self.inner.values[entry_idx]));
+                return Some(unquantize_bigram(self.inner.values[entry_idx]));
             }
             // Since columns are sorted, we can stop early
             if abs_col > col {
@@ -388,14 +388,14 @@ impl StaticLmCompiler {
             let q_unigrams: Vec<u8> = self
                 .unigrams
                 .iter()
-                .map(|&log10_prob| quantize_log_prob(log10_prob))
+                .map(|&log10_prob| quantize_unigram(log10_prob))
                 .collect();
             let q_matrix: BTreeMap<(u32, u32), u8> = self
                 .matrix
                 .iter()
-                .map(|(&k, &log10_prob)| {
-                    let quantized = quantize_log_prob(log10_prob);
-                    ((k.0.0, k.1.0), quantized)
+                .map(|(&(w1, w2), &log10_prob)| {
+                    let quantized = quantize_bigram(log10_prob);
+                    ((w1.0, w2.0), quantized)
                 })
                 .collect();
 
@@ -480,15 +480,27 @@ impl StaticLmCompiler {
 
 const MIN_LOGLOG: f64 = -0.3;
 const MAX_LOGLOG: f64 = 1.3;
+const UNI_LEVELS: f64 = 255.0;
 
-fn quantize_log_prob(log10prob: f64) -> u8 {
+fn quantize_unigram(log10prob: f64) -> u8 {
     let loglog = log10prob.neg().log10().clamp(MIN_LOGLOG, MAX_LOGLOG);
-    let q = ((loglog - MIN_LOGLOG) / (MAX_LOGLOG - MIN_LOGLOG) * 255.0 + 0.5) as i32;
+    let q = ((loglog - MIN_LOGLOG) / (MAX_LOGLOG - MIN_LOGLOG) * UNI_LEVELS + 0.5) as i32;
     q.clamp(0, 255) as u8
 }
 
-fn unquantize_log_prob(quantum: u8) -> f64 {
-    let loglog = (quantum as f64) / 255.0 * (MAX_LOGLOG - MIN_LOGLOG) + MIN_LOGLOG;
+fn unquantize_unigram(q: u8) -> f64 {
+    let loglog = q as f64 / UNI_LEVELS * (MAX_LOGLOG - MIN_LOGLOG) + MIN_LOGLOG;
+    10.0_f64.powf(loglog).neg()
+}
+
+fn quantize_bigram(log10prob: f64) -> u8 {
+    let loglog = log10prob.neg().log10().clamp(MIN_LOGLOG, MAX_LOGLOG);
+    let q = ((loglog - MIN_LOGLOG) / (MAX_LOGLOG - MIN_LOGLOG) * 15.0 + 0.5) as i32;
+    q.clamp(0, 15) as u8
+}
+
+fn unquantize_bigram(quantum: u8) -> f64 {
+    let loglog = (quantum as f64) / 15.0 * (MAX_LOGLOG - MIN_LOGLOG) + MIN_LOGLOG;
     10.0_f64.powf(loglog).neg()
 }
 
@@ -500,7 +512,7 @@ mod test {
     use crate::{
         lm::{
             StaticLmCompiler,
-            static_lm::{LoadMode, StaticLm, quantize_log_prob, unquantize_log_prob},
+            static_lm::{LoadMode, StaticLm, quantize_bigram, unquantize_bigram},
         },
         model::WordId,
     };
@@ -577,16 +589,16 @@ mod test {
     #[test]
     fn quantize_unquantize() {
         let e = 0.6;
-        assert!((0.0 - unquantize_log_prob(quantize_log_prob(0.0))).abs() < e);
-        assert!((-1.0 - unquantize_log_prob(quantize_log_prob(-1.0))).abs() < e);
-        assert!((-5.0 - unquantize_log_prob(quantize_log_prob(-5.0))).abs() < e);
-        assert!((-10.0 - unquantize_log_prob(quantize_log_prob(-10.0))).abs() < e);
+        assert!((0.0 - unquantize_bigram(quantize_bigram(0.0))).abs() < e);
+        assert!((-1.0 - unquantize_bigram(quantize_bigram(-1.0))).abs() < e);
+        assert!((-5.0 - unquantize_bigram(quantize_bigram(-5.0))).abs() < e);
+        assert!((-10.0 - unquantize_bigram(quantize_bigram(-10.0))).abs() < e);
     }
 
     #[test]
     fn quantize_roundtrip_error() {
         for i in 0..=255 {
-            let q = quantize_log_prob(unquantize_log_prob(i as u8));
+            let q = quantize_bigram(unquantize_bigram(i as u8));
             assert_eq!(q, i as u8);
         }
     }
