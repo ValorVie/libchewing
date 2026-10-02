@@ -1987,7 +1987,7 @@ void test_KB_HSU_example()
     chewing_clean_preedit_buf(ctx);
 
     type_keystroke_by_string(ctx, "sm sxajdwjxfsxajdgscewfhidxfdwjcdrnd");
-    ok_preedit_buffer(ctx, "三歲到五歲的小孩舞蹈時人");
+    ok_preedit_buffer(ctx, "三歲到五歲的小孩舞蹈時任");
     chewing_clean_preedit_buf(ctx);
 
     type_keystroke_by_string(ctx, "jxl cewjdxl lxjxfdxmjleojcde cekjxfnxljcdve hwjjeoflod");

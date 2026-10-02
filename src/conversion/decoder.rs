@@ -40,7 +40,7 @@ pub struct Hypothesis {
 
 impl Decoder {
     /// Default bigram to unigram back-off weight
-    pub const LAMBDA: f64 = 0.6;
+    pub const LAMBDA: f64 = 0.8;
 
     /// Decodes the word lattice and returns the n-best hypotheses.
     ///
