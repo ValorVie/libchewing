@@ -13,5 +13,6 @@ pkgs.mkShell {
     ninja
     ncurses
     valgrind
+    lldb
   ];
 }
