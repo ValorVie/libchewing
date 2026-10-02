@@ -388,25 +388,14 @@ impl StaticLmCompiler {
             let q_unigrams: Vec<u8> = self
                 .unigrams
                 .iter()
-                .filter_map(|&log10_prob| {
-                    let quantized = quantize_log_prob(log10_prob);
-                    if quantized == 0 {
-                        None
-                    } else {
-                        Some(quantized)
-                    }
-                })
+                .map(|&log10_prob| quantize_log_prob(log10_prob))
                 .collect();
             let q_matrix: BTreeMap<(u32, u32), u8> = self
                 .matrix
                 .iter()
-                .filter_map(|(&k, &log10_prob)| {
+                .map(|(&k, &log10_prob)| {
                     let quantized = quantize_log_prob(log10_prob);
-                    if quantized == 0 {
-                        None
-                    } else {
-                        Some(((k.0.0, k.1.0), quantized))
-                    }
+                    ((k.0.0, k.1.0), quantized)
                 })
                 .collect();
 
