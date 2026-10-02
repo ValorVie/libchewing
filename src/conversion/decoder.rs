@@ -103,9 +103,11 @@ impl Decoder {
     fn cost_fun(&self, w1: &Candidate, w2: &Candidate) -> f64 {
         let (wid1, wid2) = match (w1, w2) {
             (Candidate::Word { wid: a, .. }, Candidate::Word { wid: b, .. }) => (*a, *b),
-            (Candidate::Word { wid: b, .. }, _) | (_, Candidate::Word { wid: b, .. }) => {
-                (WordId(0), *b)
+            (_, Candidate::Grapheme(_)) => {
+                // Selected words, snapshots, or punctuations has 100% certanity
+                return 0.0;
             }
+            (_, Candidate::Word { wid: b, .. }) => (WordId(0), *b),
             _ => return ERROR_FLOOR.neg(),
         };
         let (hist_prob, user_pref) = match w2 {
