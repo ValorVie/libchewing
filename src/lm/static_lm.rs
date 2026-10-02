@@ -483,8 +483,8 @@ const MAX_LOGLOG: f64 = 1.3;
 
 fn quantize_log_prob(log10prob: f64) -> u8 {
     let loglog = log10prob.neg().log10().clamp(MIN_LOGLOG, MAX_LOGLOG);
-    let quantized = ((loglog - MIN_LOGLOG) / (MAX_LOGLOG - MIN_LOGLOG) * 255.0) as u8;
-    quantized
+    let q = ((loglog - MIN_LOGLOG) / (MAX_LOGLOG - MIN_LOGLOG) * 255.0 + 0.5) as i32;
+    q.clamp(0, 255) as u8
 }
 
 fn unquantize_log_prob(quantum: u8) -> f64 {
@@ -581,6 +581,14 @@ mod test {
         assert!((-1.0 - unquantize_log_prob(quantize_log_prob(-1.0))).abs() < e);
         assert!((-5.0 - unquantize_log_prob(quantize_log_prob(-5.0))).abs() < e);
         assert!((-10.0 - unquantize_log_prob(quantize_log_prob(-10.0))).abs() < e);
+    }
+
+    #[test]
+    fn quantize_roundtrip_error() {
+        for i in 0..=255 {
+            let q = quantize_log_prob(unquantize_log_prob(i as u8));
+            assert_eq!(q, i as u8);
+        }
     }
 
     /// Helper: compile, serialize, deserialize in the given mode, and return the LM.
