@@ -69,6 +69,9 @@ pub(crate) fn segment(static_lm: &Path, words: &Path) -> Result<()> {
                                 segmented.push_str(&segstr);
                             }
                         }
+                        result_send
+                            .send(segmented)
+                            .expect("unable to send output to stdout");
                     }
                 }
             });
