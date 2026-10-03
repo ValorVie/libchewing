@@ -197,9 +197,19 @@ impl StaticLm {
                 .read_data_exact(col_deltas_len as usize)?
                 .into_boxed_slice();
 
-            let values = decoder
-                .read_data_exact(num_values as usize)?
+            let packed_values = decoder
+                .read_data_exact((num_values as usize + 1) / 2)?
                 .into_boxed_slice();
+
+            // Unpack
+            let mut values = Vec::with_capacity(num_values as usize);
+            for byte in packed_values.into_iter() {
+                values.push(byte >> 4);
+                if values.len() < num_values as usize {
+                    values.push(byte & 0x0F);
+                }
+            }
+            let values: Box<[u8]> = values.into_boxed_slice();
 
             // Build column storage based on load mode
             let cols = match mode {
@@ -468,6 +478,11 @@ impl StaticLmCompiler {
             }
             row_byte_offsets[self.rows as usize] = col_deltas_buf.len() as u32;
 
+            let packed_values: Vec<u8> = values_buf
+                .chunks(2)
+                .map(|c| (c[0] << 4) | (*c.get(1).unwrap_or(&0) & 0x0F))
+                .collect();
+
             // Magic
             encoder.write_data_exact(b"CHLM")?;
             // Version 0
@@ -511,7 +526,7 @@ impl StaticLmCompiler {
             // col_deltas (varint stream)
             encoder.write_data_exact(&col_deltas_buf)?;
             // values
-            encoder.write_data_exact(&values_buf)?;
+            encoder.write_data_exact(&packed_values)?;
 
             Ok(())
         })
@@ -868,6 +883,24 @@ mod test {
             assert!(lm.get(1, 1000).is_some(), "mode {:?}", mode);
             assert!(lm.get(1, 1998).is_some(), "mode {:?}", mode);
             assert!(lm.get(1, 1001).is_none(), "mode {:?}", mode);
+        }
+    }
+
+    #[test]
+    fn odd_entry_count_roundtrips_all_values() {
+        let mut compiler = StaticLmCompiler::new();
+        compiler.reserve_unigrams(1);
+        for (i, p) in [0.02f64, 0.05, 0.1, 0.2, 0.4].into_iter().enumerate() {
+            compiler.insert_bigram(WordId(1), WordId(i as u32), p.log10());
+        }
+        let mut buf = vec![];
+        compiler.to_writer(&mut buf).unwrap();
+        for mode in [LoadMode::Eager, LoadMode::Lazy] {
+            let lm = StaticLm::from_reader(buf.as_slice(), mode).unwrap();
+            for (i, p) in [0.02f64, 0.05, 0.1, 0.2, 0.4].iter().enumerate() {
+                let got = lm.get(1, i as u32).expect("missing entry");
+                assert!((got - p.log10()).abs() < 0.15, "entry {i}: {got}");
+            }
         }
     }
 }
