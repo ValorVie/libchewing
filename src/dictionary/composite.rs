@@ -49,7 +49,7 @@ impl CompositeDict {
             .collect();
         // rare boost
         for wid in self.inner.rare_dict.lookup(syllables, strategy) {
-            const RARE_BOOST: i8 = -100;
+            const RARE_BOOST: i8 = UserDict::MIN + 1;
             if let Some(pos) = res.iter().position(|cand| cand.0 == wid) {
                 res[pos].2 = Some(RARE_BOOST);
             } else {

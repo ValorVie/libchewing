@@ -181,7 +181,7 @@ impl UserDict {
             word_entries.push(UserDictEntry { wid, boost: -10 });
         }
     }
-    pub fn remove(&self, syllables: &[Syllable], word: &str) {
+    pub fn ban(&self, syllables: &[Syllable], word: &str) {
         let mut lock = self
             .inner
             .write()
@@ -189,7 +189,12 @@ impl UserDict {
         let wid = lock.string_table.intern(word);
         let word_entries = lock.records.entry(syllables.into()).or_default();
         if let Some(pos) = word_entries.iter().position(|e| e.wid == wid) {
-            word_entries.remove(pos);
+            word_entries[pos].boost = Self::MIN;
+        } else {
+            word_entries.push(UserDictEntry {
+                wid,
+                boost: Self::MIN,
+            });
         }
     }
     pub fn lookup(&self, syllables: &[Syllable], strategy: LookupStrategy) -> Vec<(WordId, i8)> {
@@ -201,7 +206,13 @@ impl UserDict {
             LookupStrategy::Standard => lock
                 .records
                 .get(syllables)
-                .map(|entries| entries.iter().map(|e| (e.wid, e.boost)).collect())
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter(|e| e.boost != Self::MIN)
+                        .map(|e| (e.wid, e.boost))
+                        .collect()
+                })
                 .unwrap_or_default(),
             LookupStrategy::FuzzyPartialPrefix => {
                 let mut end = syllables.to_vec();
@@ -210,7 +221,12 @@ impl UserDict {
                 end.push(Syllable::new());
                 lock.records
                     .range::<[Syllable], _>((Included(syllables), Excluded(end.as_slice())))
-                    .flat_map(|(_, entries)| entries.iter().map(|e| (e.wid, e.boost)))
+                    .flat_map(|(_, entries)| {
+                        entries
+                            .iter()
+                            .filter(|e| e.boost != Self::MIN)
+                            .map(|e| (e.wid, e.boost))
+                    })
                     .collect()
             }
         }

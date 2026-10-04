@@ -879,7 +879,7 @@ impl SharedState {
         })
     }
     fn unlearn_phrase(&mut self, syllables: &[Syllable], phrase: &str) -> Result<(), EditorError> {
-        self.user_dict.remove(syllables, phrase);
+        self.user_dict.ban(syllables, phrase);
         self.hist_dict.remove(syllables, phrase);
         self.dirty_level += 1;
         Ok(())
