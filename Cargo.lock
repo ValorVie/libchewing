@@ -92,7 +92,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "chewing"
-version = "0.14.0-alpha.2"
+version = "0.14.0-alpha.3"
 dependencies = [
  "bstr",
  "der",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "chewing-cli"
-version = "0.14.0-alpha.2"
+version = "0.14.0-alpha.3"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -117,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "chewing_capi"
-version = "0.14.0-alpha.2"
+version = "0.14.0-alpha.3"
 dependencies = [
  "chewing",
  "env_logger",
@@ -127,7 +127,7 @@ dependencies = [
 
 [[package]]
 name = "chewing_testhelper"
-version = "0.14.0-alpha.2"
+version = "0.14.0-alpha.3"
 dependencies = [
  "chewing",
 ]
@@ -252,7 +252,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "fuzzer"
-version = "0.14.0-alpha.2"
+version = "0.14.0-alpha.3"
 dependencies = [
  "chewing",
  "chewing_capi",
