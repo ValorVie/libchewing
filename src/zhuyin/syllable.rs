@@ -9,7 +9,7 @@ use std::{
     str::FromStr,
 };
 
-use scoped_error::{expect_error, impl_context_error};
+use scoped_error::{bail, expect_error, impl_context_error};
 
 use super::{Bopomofo, BopomofoKind};
 
@@ -26,12 +26,15 @@ impl SyllableVec {
         Self::default()
     }
 
-    pub fn push(&mut self, value: Syllable) {
-        if self.len == Self::MAX_LEN as u8 {
-            panic!("SyllableVec can only store up to 10 syllables");
-        }
-        self.buf[self.len as usize] = value;
-        self.len += 1;
+    pub fn push(&mut self, value: Syllable) -> Result<(), SyllableVecTooLongError> {
+        expect_error("Failed to update SyllableVec", || {
+            if self.len == Self::MAX_LEN as u8 {
+                bail!("SyllableVec can only store up to 10 syllables");
+            }
+            self.buf[self.len as usize] = value;
+            self.len += 1;
+            Ok(())
+        })
     }
 }
 
@@ -93,19 +96,20 @@ impl<'a> IntoIterator for &'a SyllableVec {
     }
 }
 
-impl<T> From<T> for SyllableVec
-where
-    T: AsRef<[Syllable]>,
-{
-    fn from(value: T) -> Self {
-        if value.as_ref().len() > Self::MAX_LEN {
-            panic!("SyllableVec can only store up to 10 syllables");
-        }
-        let mut vec = SyllableVec::new();
-        let len = value.as_ref().len().min(Self::MAX_LEN);
-        vec.buf[..len].copy_from_slice(&value.as_ref()[..len]);
-        vec.len = len as u8;
-        vec
+impl TryFrom<&[Syllable]> for SyllableVec {
+    type Error = SyllableVecTooLongError;
+
+    fn try_from(value: &[Syllable]) -> Result<Self, Self::Error> {
+        expect_error("Failed to convert slice to SyllableVec", || {
+            if value.as_ref().len() > Self::MAX_LEN {
+                bail!("SyllableVec can only store up to 10 syllables");
+            }
+            let mut vec = SyllableVec::new();
+            let len = value.as_ref().len().min(Self::MAX_LEN);
+            vec.buf[..len].copy_from_slice(&value.as_ref()[..len]);
+            vec.len = len as u8;
+            Ok(vec)
+        })
     }
 }
 
@@ -118,14 +122,14 @@ impl FromStr for SyllableVec {
             let mut builder = SyllableBuilder::new();
             for ch in s.chars() {
                 if ch.is_whitespace() || ch == '-' {
-                    res.push(builder.build());
+                    res.push(builder.build())?;
                     builder = SyllableBuilder::new();
                     continue;
                 }
                 let bopomofo: Bopomofo = Bopomofo::try_from(ch)?;
                 builder = builder.insert(bopomofo)?;
             }
-            res.push(builder.build());
+            res.push(builder.build())?;
             Ok(res)
         })
     }
@@ -480,6 +484,7 @@ impl SyllableBuilder {
     }
 }
 
+impl_context_error!(pub SyllableVecTooLongError);
 impl_context_error!(pub DecodeSyllableError);
 
 /// Errors when parsing a str to a syllable.

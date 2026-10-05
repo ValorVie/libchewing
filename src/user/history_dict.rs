@@ -148,7 +148,7 @@ impl HistoryDict {
                 let mut syllables = SyllableVec::new();
                 for _ in 0..len {
                     let syl = Syllable::try_from(decoder.read_u16()?)?;
-                    syllables.push(syl);
+                    syllables.push(syl)?;
                 }
                 let file_wid = decoder.read_u32()?;
                 let count = decoder.read_f32()?;
@@ -315,6 +315,9 @@ impl HistoryDict {
             .inner
             .write()
             .expect("Unable to acquire HistoryDict writer lock");
+        let Ok(syl_vec) = syllables.try_into() else {
+            return;
+        };
         let wid = lock.string_table.intern(word);
         let h = lock.half_life;
 
@@ -324,7 +327,7 @@ impl HistoryDict {
         lock.unigram_total = effective_count_f64(uni_t, g, uni_lg, h) + 1.0;
         lock.unigram_total_last_gen = g;
 
-        let uni_entries = lock.unigrams.entry(syllables.into()).or_default();
+        let uni_entries = lock.unigrams.entry(syl_vec).or_default();
         if let Some(pos) = uni_entries.iter().position(|e| e.wid == wid) {
             let e = &mut uni_entries[pos];
             e.count = effective_count(e.count, g, e.last_gen, h) + 1.0;
@@ -375,8 +378,11 @@ impl HistoryDict {
             .inner
             .write()
             .expect("Unable to acquire UserDict writer lock");
+        let Ok(syl_vec) = syllables.try_into() else {
+            return;
+        };
         let wid = lock.string_table.intern(word);
-        let uni_entries = lock.unigrams.entry(syllables.into()).or_default();
+        let uni_entries = lock.unigrams.entry(syl_vec).or_default();
         if let Some(pos) = uni_entries.iter().position(|e| e.wid == wid) {
             uni_entries.swap_remove(pos);
         }

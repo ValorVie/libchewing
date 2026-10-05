@@ -11,6 +11,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use log::error;
 use scoped_error::{expect_error, impl_context_error};
 
 use crate::{
@@ -96,7 +97,13 @@ impl UserDict {
                     .next()
                     .map(|b| i8::from_str(b).unwrap_or(0).clamp(Self::MIN, Self::MAX))
                     .unwrap_or(0);
-                let syllables: SyllableVec = bopomofo.trim().parse()?;
+                let Ok(syllables) = bopomofo.trim().parse() else {
+                    error!(
+                        "Skipping {bopomofo}: longer than max allowed length {}",
+                        SyllableVec::MAX_LEN
+                    );
+                    continue;
+                };
 
                 let wid = string_table.intern(word);
 
@@ -148,11 +155,13 @@ impl UserDict {
             .inner
             .write()
             .expect("Unable to acquire UserDict writer lock");
-        let wid = lock.string_table.intern(word);
-        log::debug!("intern {} => {}", word, wid);
-        let word_entries = lock.records.entry(syllables.into()).or_default();
-        if word_entries.iter().find(|e| e.wid == wid).is_none() {
-            word_entries.push(UserDictEntry { wid, boost: 10 });
+        if let Ok(syl_vec) = syllables.try_into() {
+            let wid = lock.string_table.intern(word);
+            log::debug!("intern {} => {}", word, wid);
+            let word_entries = lock.records.entry(syl_vec).or_default();
+            if word_entries.iter().find(|e| e.wid == wid).is_none() {
+                word_entries.push(UserDictEntry { wid, boost: 10 });
+            }
         }
     }
     pub fn boost(&self, syllables: &[Syllable], word: &str) {
@@ -160,12 +169,15 @@ impl UserDict {
             .inner
             .write()
             .expect("Unable to acquire UserDict writer lock");
-        let wid = lock.string_table.intern(word);
-        let word_entries = lock.records.entry(syllables.into()).or_default();
-        if let Some(pos) = word_entries.iter().position(|e| e.wid == wid) {
-            word_entries[pos].boost = (word_entries[pos].boost + 100).clamp(Self::MIN, Self::MAX);
-        } else {
-            word_entries.push(UserDictEntry { wid, boost: 10 });
+        if let Ok(syl_vec) = syllables.try_into() {
+            let wid = lock.string_table.intern(word);
+            let word_entries = lock.records.entry(syl_vec).or_default();
+            if let Some(pos) = word_entries.iter().position(|e| e.wid == wid) {
+                word_entries[pos].boost =
+                    (word_entries[pos].boost + 100).clamp(Self::MIN, Self::MAX);
+            } else {
+                word_entries.push(UserDictEntry { wid, boost: 10 });
+            }
         }
     }
     pub fn deboost(&self, syllables: &[Syllable], word: &str) {
@@ -173,12 +185,15 @@ impl UserDict {
             .inner
             .write()
             .expect("Unable to acquire UserDict writer lock");
-        let wid = lock.string_table.intern(word);
-        let word_entries = lock.records.entry(syllables.into()).or_default();
-        if let Some(pos) = word_entries.iter().position(|e| e.wid == wid) {
-            word_entries[pos].boost = (word_entries[pos].boost - 10).clamp(Self::MIN, Self::MAX);
-        } else {
-            word_entries.push(UserDictEntry { wid, boost: -10 });
+        if let Ok(syl_vec) = syllables.try_into() {
+            let wid = lock.string_table.intern(word);
+            let word_entries = lock.records.entry(syl_vec).or_default();
+            if let Some(pos) = word_entries.iter().position(|e| e.wid == wid) {
+                word_entries[pos].boost =
+                    (word_entries[pos].boost - 10).clamp(Self::MIN, Self::MAX);
+            } else {
+                word_entries.push(UserDictEntry { wid, boost: -10 });
+            }
         }
     }
     pub fn ban(&self, syllables: &[Syllable], word: &str) {
@@ -186,15 +201,17 @@ impl UserDict {
             .inner
             .write()
             .expect("Unable to acquire UserDict writer lock");
-        let wid = lock.string_table.intern(word);
-        let word_entries = lock.records.entry(syllables.into()).or_default();
-        if let Some(pos) = word_entries.iter().position(|e| e.wid == wid) {
-            word_entries[pos].boost = Self::MIN;
-        } else {
-            word_entries.push(UserDictEntry {
-                wid,
-                boost: Self::MIN,
-            });
+        if let Ok(syl_vec) = syllables.try_into() {
+            let wid = lock.string_table.intern(word);
+            let word_entries = lock.records.entry(syl_vec).or_default();
+            if let Some(pos) = word_entries.iter().position(|e| e.wid == wid) {
+                word_entries[pos].boost = Self::MIN;
+            } else {
+                word_entries.push(UserDictEntry {
+                    wid,
+                    boost: Self::MIN,
+                });
+            }
         }
     }
     pub fn lookup(&self, syllables: &[Syllable], strategy: LookupStrategy) -> Vec<(WordId, i8)> {
