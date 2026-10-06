@@ -72,7 +72,9 @@ impl CompositeDict {
                 res.push((wid, f64::NEG_INFINITY, Some(user_pref)));
             }
         }
+        let banned = self.inner.user_dict.lookup_banned(syllables, strategy);
         res.into_iter()
+            .filter(|cand| !banned.contains(&cand.0))
             .map(|cand| Candidate::Word {
                 wid: cand.0,
                 hist_prob: cand.1,

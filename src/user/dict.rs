@@ -159,8 +159,13 @@ impl UserDict {
             let wid = lock.string_table.intern(word);
             log::debug!("intern {} => {}", word, wid);
             let word_entries = lock.records.entry(syl_vec).or_default();
-            if word_entries.iter().find(|e| e.wid == wid).is_none() {
-                word_entries.push(UserDictEntry { wid, boost: 10 });
+            match word_entries.iter_mut().find(|e| e.wid == wid) {
+                Some(item) => {
+                    if item.boost == Self::MIN {
+                        item.boost = 10
+                    }
+                }
+                None => word_entries.push(UserDictEntry { wid, boost: 10 }),
             }
         }
     }
@@ -211,6 +216,40 @@ impl UserDict {
                     wid,
                     boost: Self::MIN,
                 });
+            }
+        }
+    }
+    pub fn lookup_banned(&self, syllables: &[Syllable], strategy: LookupStrategy) -> Vec<WordId> {
+        let lock = self
+            .inner
+            .read()
+            .expect("Unable to acquire UserDict reader lock");
+        match strategy {
+            LookupStrategy::Standard => lock
+                .records
+                .get(syllables)
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter(|e| e.boost == Self::MIN)
+                        .map(|e| e.wid)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            LookupStrategy::FuzzyPartialPrefix => {
+                let mut end = syllables.to_vec();
+                // NB: relies on the syllable encoding to
+                // ensure Syllable::EMPTY is greater than all real syllables.
+                end.push(Syllable::new());
+                lock.records
+                    .range::<[Syllable], _>((Included(syllables), Excluded(end.as_slice())))
+                    .flat_map(|(_, entries)| {
+                        entries
+                            .iter()
+                            .filter(|e| e.boost == Self::MIN)
+                            .map(|e| e.wid)
+                    })
+                    .collect()
             }
         }
     }
