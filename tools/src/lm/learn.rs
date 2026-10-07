@@ -51,8 +51,7 @@ fn compute_d_scores(
         // P(w2) = count(w2) / N
         let p_w2 = count_w2 as f64 / unigram_total as f64;
 
-        // stupid-backoff divergence contribution
-        let d = (p_w2_given_w1 - 0.4 * p_w2).abs();
+        let d = count as f64 * (p_w2_given_w1 / p_w2).ln();
 
         scores.push(((wid1, wid2), count, d));
     }
