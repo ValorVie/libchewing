@@ -600,7 +600,7 @@ void test_select_with_auto_snapshot()
     chewing_config_set_int(ctx, "chewing.auto_snapshot_selections", 1);
 
     type_keystroke_by_string(ctx, "hk4g4<T><T><T>");
-    ok_preedit_buffer(ctx, "側室");
+    ok_preedit_buffer(ctx, "側是");
 
     chewing_clean_preedit_buf(ctx);
 
@@ -1959,7 +1959,7 @@ void test_KB_HSU_example()
     chewing_clean_preedit_buf(ctx);
 
     type_keystroke_by_string(ctx, "xajlgsbewfmeldty dgsjxl cen ");
-    ok_preedit_buffer(ctx, "為了表明它的中心");
+    ok_preedit_buffer(ctx, "為了表明他的中心");
     chewing_clean_preedit_buf(ctx);
 
     type_keystroke_by_string(ctx, "jenj<D>3zjjefdgslejlekj");
@@ -1971,11 +1971,11 @@ void test_KB_HSU_example()
     chewing_clean_preedit_buf(ctx);
 
     type_keystroke_by_string(ctx, "cekjtidbafjelffk zjcof");
-    ok_preedit_buffer(ctx, "向台北警方自首");
+    ok_preedit_buffer(ctx, "像台北警方自首");
     chewing_clean_preedit_buf(ctx);
 
     type_keystroke_by_string(ctx, "cekjtidbafjelffk txldekjdgseofnldlej");
-    ok_preedit_buffer(ctx, "向台北警方同樣的有能力");
+    ok_preedit_buffer(ctx, "像台北警方同樣的有能力");
     chewing_clean_preedit_buf(ctx);
 
     type_keystroke_by_string(ctx, "jeofuejcdrjceyjxfljcd<D><D>4xfcdxffn ");
@@ -1987,11 +1987,11 @@ void test_KB_HSU_example()
     chewing_clean_preedit_buf(ctx);
 
     type_keystroke_by_string(ctx, "sm sxajdwjxfsxajdgscewfhidxfdwjcdrnd");
-    ok_preedit_buffer(ctx, "三歲到五歲的小孩舞蹈時任");
+    ok_preedit_buffer(ctx, "三歲到五歲的小孩舞蹈十人");
     chewing_clean_preedit_buf(ctx);
 
     type_keystroke_by_string(ctx, "jxl cewjdxl lxjxfdxmjleojcde cekjxfnxljcdve hwjjeoflod");
-    ok_preedit_buffer(ctx, "忠孝東路五段六十一巷五弄十七號酒樓");
+    ok_preedit_buffer(ctx, "忠孝東路五段六十一項侮弄十七號九樓");
     chewing_clean_preedit_buf(ctx);
 
     type_keystroke_by_string(ctx, "tidxm dgsrndgxl hnfgxaj");

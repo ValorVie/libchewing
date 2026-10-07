@@ -36,11 +36,19 @@ endif()
 
 include(CheckCCompilerFlag)
 include(FetchContent)
+include(CMakeDependentOption)
 
 option(BUILD_SHARED_LIBS "Build using shared libraries" ON)
 option(USE_SYSTEM_CHEWING_CLI "Use system-installed chewing-cli to build dictionary" OFF)
 option(BUILD_DOC "Build documentation" ON)
 option(BUILD_DATA "Build chewing dictionaries" ON)
+cmake_dependent_option(
+    USE_BUNDLED_STATIC_LM
+    "Use bundled static_lm.arpa file"
+    ON
+    "EXISTS ${CMAKE_SOURCE_DIR}/data/dict/chewing_v4/static_lm.arpa"
+    OFF
+)
 
 if(CMAKE_C_COMPILER_ID MATCHES GNU|Clang)
     set(CMAKE_C_FLAGS "-std=gnu99 -finput-charset=utf-8 ${CMAKE_C_FLAGS}")
