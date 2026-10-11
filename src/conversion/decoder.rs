@@ -58,7 +58,7 @@ impl Decoder {
         }
 
         // Prune
-        const KEEP_PER_SPAN: usize = 10;
+        const KEEP_PER_SPAN: usize = 20;
         for es in lattice.edges.iter_mut() {
             if es.len() <= KEEP_PER_SPAN {
                 continue;
