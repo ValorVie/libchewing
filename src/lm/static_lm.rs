@@ -271,7 +271,7 @@ impl StaticLm {
     }
 
     pub fn bigram(&self, wid1: WordId, wid2: WordId) -> f64 {
-        if matches!(wid1.orig(), WordOrig::User) || matches!(wid2.orig(), WordOrig::User) {
+        if !(matches!(wid1.orig(), WordOrig::Static) && matches!(wid2.orig(), WordOrig::Static)) {
             return f64::NEG_INFINITY;
         }
         self.get(wid1.0, wid2.0).unwrap_or(f64::NEG_INFINITY)

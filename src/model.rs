@@ -28,6 +28,7 @@ impl From<u32> for WordId {
 impl WordId {
     pub(crate) const MIN_STATIC: u32 = 0x00000000;
     pub(crate) const MIN_USER: u32 = 0x01000000;
+    pub(crate) const UNKNOWN: WordId = WordId(0xFF000000);
     pub(crate) fn as_offset(&self) -> usize {
         (self.0 & 0x00FFFFFF) as usize
     }

@@ -107,7 +107,7 @@ impl Decoder {
                 // Selected words, snapshots, or punctuations has 100% certanity
                 return 0.0;
             }
-            (_, Candidate::Word { wid: b, .. }) => (WordId(0), *b),
+            (_, Candidate::Word { wid: b, .. }) => (WordId::UNKNOWN, *b),
             _ => return ERROR_FLOOR.neg(),
         };
         let (hist_prob, user_pref) = match w2 {
