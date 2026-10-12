@@ -5,7 +5,7 @@ use std::{
     cmp::{max, min},
     fmt::Debug,
     fs::{self, File},
-    hash::{DefaultHasher, Hash, Hasher},
+    hash::{BuildHasher, Hasher, RandomState},
     io::{BufReader, BufWriter},
     mem,
     path::PathBuf,
@@ -699,9 +699,9 @@ impl Editor {
                 use std::os::unix::fs::OpenOptionsExt;
                 file_options.mode(0o600);
             }
-            let mut hasher = DefaultHasher::new();
+            let mut hasher = RandomState::new().build_hasher();
 
-            1.hash(&mut hasher);
+            hasher.write("user_dict.csv".as_bytes());
             let user_dict_path = ud.join("user_dict.csv");
             let temp_path = ud.join(format!("{:x}.tmp", hasher.finish()));
             let temp_file = match file_options.open(&temp_path) {
@@ -713,14 +713,16 @@ impl Editor {
             };
             if let Err(err) = user_dict.to_writer(BufWriter::new(temp_file)) {
                 error!("Unable to write user dict file: {err}");
+                let _ = fs::remove_file(&temp_path);
                 return;
             };
             if let Err(err) = fs::rename(&temp_path, &user_dict_path) {
                 error!("Unable to write user dict file: {err}");
+                let _ = fs::remove_file(&temp_path);
                 return;
             };
 
-            2.hash(&mut hasher);
+            hasher.write("history_dict.bin".as_bytes());
             let hist_dict_path = ud.join("history_dict.bin");
             let temp_path = ud.join(format!("{:x}.tmp", hasher.finish()));
             let temp_file = match file_options.open(&temp_path) {
@@ -732,10 +734,12 @@ impl Editor {
             };
             if let Err(err) = hist_dict.to_writer(BufWriter::new(temp_file)) {
                 error!("Unable to write user dict file: {err}");
+                let _ = fs::remove_file(&temp_path);
                 return;
             };
             if let Err(err) = fs::rename(&temp_path, &hist_dict_path) {
                 error!("Unable to write user dict file: {err}");
+                let _ = fs::remove_file(&temp_path);
                 return;
             };
         }
