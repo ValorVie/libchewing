@@ -217,7 +217,7 @@ impl StringTableBuilder {
         expect_error("Failed to serialize StaticDict", || {
             let chd = Chd::build(&self.words, 4);
             let mut words = self.words.clone();
-            words.sort_unstable_by_key(|s| chd.lookup(s));
+            words.sort_by_key(|s| chd.lookup(s));
 
             let mut encoder = BareEncoder::new(writer);
             // Write magic

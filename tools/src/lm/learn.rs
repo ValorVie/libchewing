@@ -57,7 +57,7 @@ fn compute_d_scores(
     }
 
     // Sort descending — largest first.
-    scores.sort_unstable_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    scores.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
 
     scores
 }

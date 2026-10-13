@@ -545,11 +545,11 @@ void test_select_candidate_sorted()
     ChewingContext *ctx;
 
     static const char *CAND1[] = {
-        "妙", "廟", "繆", "庙", "玅", "庿", "謬",
+        "妙", "廟", "庙", "玅", "庿", "繆", "謬",
     };
 
     static const char *CAND2[] = {
-        "廟", "妙", "繆", "庙", "玅", "庿", "謬",
+        "廟", "妙", "庙", "玅", "庿", "繆", "謬",
     };
 
     clean_userphrase();
@@ -1933,7 +1933,7 @@ void test_KB_HSU()
     type_keystroke_by_string(ctx, "e");
     ok_bopomofo_buffer(ctx, "ㄐㄩㄝ");
     type_keystroke_by_string(ctx, "d");
-    ok_preedit_buffer(ctx, "角");  /* convert "ㄍㄩㄝ" to "ㄐㄩㄝ" */
+    ok_preedit_buffer(ctx, "覺");  /* convert "ㄍㄩㄝ" to "ㄐㄩㄝ" */
     chewing_clean_preedit_buf(ctx);
 
     chewing_delete(ctx);

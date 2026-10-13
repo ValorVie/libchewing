@@ -74,7 +74,7 @@ impl Decoder {
                 })
                 .collect();
             // group by span end, cheapest-first within each span
-            ranked.sort_unstable_by_key(|&(end, cost, _)| (end, cost));
+            ranked.sort_by_key(|&(end, cost, _)| (end, cost));
 
             es.clear();
             for group in ranked.chunk_by(|a, b| a.0 == b.0) {
