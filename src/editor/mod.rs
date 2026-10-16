@@ -18,6 +18,7 @@ use scoped_error::{ErrorExt, bail, expect_error, impl_context_error};
 pub use self::{abbrev::AbbrevTable, selection::symbol::SymbolSelector};
 use self::{
     composition_editor::CompositionEditor,
+    keybind::Prefix,
     selection::{phrase::PhraseSelector, symbol::SpecialSymbolSelector},
     zhuyin_layout::{KeyBehavior, Standard, SyllableEditor},
 };
@@ -27,7 +28,12 @@ use crate::{
         SimpleEngine, Symbol, full_width_symbol_input, special_symbol_input,
     },
     dictionary::{CompositeDict, LookupStrategy, StringTable},
-    input::{KeyState, KeyboardEvent, keysym::*},
+    editor::{action::Action, keybind::Keybinding},
+    input::{
+        KeyState, KeyboardEvent,
+        keycode::{KEY_LEFT, KEY_RIGHT},
+        keysym::*,
+    },
     lm::{LoadMode, StaticDict, StaticLm},
     path::SearchPath,
     user::{HistoryDict, UserDict, migrate_v3_to_v4, should_migrate_from_v3},
@@ -35,7 +41,9 @@ use crate::{
 };
 
 mod abbrev;
+pub mod action;
 mod composition_editor;
+pub mod keybind;
 mod selection;
 pub mod zhuyin_layout;
 
@@ -168,6 +176,7 @@ pub(crate) struct SharedState {
     hist_dict: HistoryDict,
     decoder: Decoder,
     abbr: AbbrevTable,
+    keybindings: Vec<Keybinding>,
     sym_sel: SymbolSelector,
     options: EditorOptions,
     last_key_behavior: EditorKeyBehavior,
@@ -337,6 +346,7 @@ impl Editor {
                 hist_dict,
                 decoder,
                 abbr,
+                keybindings: Self::keybindings_default(),
                 sym_sel,
                 options: EditorOptions::default(),
                 last_key_behavior: EditorKeyBehavior::Absorb,
@@ -351,6 +361,29 @@ impl Editor {
 
     pub fn fallback() -> Editor {
         EditorBuilder::new().build()
+    }
+
+    pub fn keybindings_default() -> Vec<Keybinding> {
+        vec![
+            Keybinding {
+                prefix: Prefix::Any,
+                trigger: KeyboardEvent::builder()
+                    .code(KEY_LEFT)
+                    .ksym(SYM_LEFT)
+                    .build(),
+                action: Action::MoveCursorLeft,
+                param: None,
+            },
+            Keybinding {
+                prefix: Prefix::Any,
+                trigger: KeyboardEvent::builder()
+                    .code(KEY_RIGHT)
+                    .ksym(SYM_RIGHT)
+                    .build(),
+                action: Action::MoveCursorRight,
+                param: None,
+            },
+        ]
     }
 
     pub fn set_syllable_editor(&mut self, syl: Box<dyn SyllableEditor>) {
@@ -1132,6 +1165,30 @@ impl Entering {
 
 impl State for Entering {
     fn next(&mut self, shared: &mut SharedState, ev: KeyboardEvent) -> Transition {
+        if let Some(keybind) = shared
+            .keybindings
+            .iter()
+            .find(|kb| kb.matches(Prefix::Entering, &ev))
+        {
+            return match keybind.action {
+                Action::MoveCursorLeft => {
+                    if shared.com.is_empty() {
+                        return self.spin_ignore();
+                    }
+                    shared.com.move_cursor_left(1);
+                    self.spin_absorb()
+                }
+                Action::MoveCursorRight => {
+                    if shared.com.is_empty() {
+                        return self.spin_ignore();
+                    }
+                    shared.com.move_cursor_right(1);
+                    self.spin_absorb()
+                }
+                Action::Ignore => self.spin_ignore(),
+                Action::Other(_) => self.spin_ignore(),
+            };
+        }
         match ev.ksym {
             SYM_BACKSPACE => {
                 if shared.com.is_empty() {
@@ -1218,16 +1275,6 @@ impl State for Entering {
                 }
                 // shared.snapshot();
                 self.start_highlighting(shared.cursor() + 1)
-            }
-            SYM_LEFT => {
-                // shared.snapshot();
-                shared.com.move_cursor_left(1);
-                self.spin_absorb()
-            }
-            SYM_RIGHT => {
-                // shared.snapshot();
-                shared.com.move_cursor_right(1);
-                self.spin_absorb()
             }
             SYM_UP => self.spin_ignore(),
             SYM_SPACE
