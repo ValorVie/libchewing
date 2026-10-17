@@ -16,16 +16,39 @@ pub struct ChewingEngine {
     pub word_lattice_builder: LatticeBuilder,
     pub decoder: Decoder,
     pub string_table: StringTable,
+    #[cfg(feature = "d512")]
+    pub d512: crate::d512::SharedD512State,
 }
 
 impl ChewingEngine {
+    #[cfg(feature = "d512")]
+    pub fn set_sentence_scorer(
+        &mut self,
+        scorer: Option<Box<dyn crate::d512::SentenceScorer + Send>>,
+        options: crate::d512::D512Options,
+    ) -> Result<(), crate::d512::D512Error> {
+        self.d512
+            .lock()
+            .map_err(|_| crate::d512::D512Error::Busy)?
+            .configure(scorer, options)
+    }
+    #[cfg(feature = "d512")]
+    pub fn set_d512_context(&mut self, context: &str) {
+        if let Ok(mut s) = self.d512.lock() {
+            s.set_context(context);
+        }
+    }
+    #[cfg(feature = "d512")]
+    pub fn d512_report(&self) -> Option<crate::d512::D512Report> {
+        self.d512.try_lock().ok()?.report()
+    }
     const MAX_OUT: u8 = 10;
 
     pub(crate) fn convert<'a>(&'a self, com: &'a Composition) -> Vec<Outcome> {
         let lattice = self.word_lattice_builder.build_lattice(com);
         let hypothesis = self.decoder.decoden(lattice, Self::MAX_OUT);
 
-        hypothesis
+        let outcomes: Vec<Outcome> = hypothesis
             .into_iter()
             .map(|hyp| {
                 let cost = hyp.cost;
@@ -64,11 +87,23 @@ impl ChewingEngine {
                     debug!("Cost {:>5.2} {:?}", out.cost, out.intervals);
                 }
             })
-            .collect()
+            .collect();
+        #[cfg(feature = "d512")]
+        if self.word_lattice_builder.lookup_strategy == crate::dictionary::LookupStrategy::Standard
+        {
+            if let Ok(mut state) = self.d512.try_lock() {
+                return state.rerank(com, &self.string_table, outcomes);
+            }
+        }
+        outcomes
     }
 }
 
 impl ConversionEngine for ChewingEngine {
+    #[cfg(feature = "d512")]
+    fn set_d512_state(&mut self, state: crate::d512::SharedD512State) {
+        self.d512 = state;
+    }
     fn convert<'a>(&'a self, comp: &'a Composition) -> Vec<Outcome> {
         ChewingEngine::convert(self, comp)
     }
@@ -157,6 +192,8 @@ mod tests {
             lookup_strategy: LookupStrategy::Standard,
         };
         let engine = ChewingEngine {
+            #[cfg(feature = "d512")]
+            d512: Default::default(),
             word_lattice_builder,
             decoder: Decoder {
                 lm: StaticLm::new(),
@@ -210,6 +247,8 @@ mod tests {
             lookup_strategy: LookupStrategy::Standard,
         };
         let engine = ChewingEngine {
+            #[cfg(feature = "d512")]
+            d512: Default::default(),
             word_lattice_builder,
             decoder: Decoder {
                 lm: StaticLm::new(),
@@ -277,6 +316,8 @@ mod tests {
             lookup_strategy: LookupStrategy::Standard,
         };
         let engine = ChewingEngine {
+            #[cfg(feature = "d512")]
+            d512: Default::default(),
             word_lattice_builder,
             decoder: Decoder {
                 lm: StaticLm::new(),
@@ -336,6 +377,8 @@ mod tests {
             lookup_strategy: LookupStrategy::Standard,
         };
         let engine = ChewingEngine {
+            #[cfg(feature = "d512")]
+            d512: Default::default(),
             word_lattice_builder,
             decoder: Decoder {
                 lm: StaticLm::new(),
@@ -378,6 +421,8 @@ mod tests {
             lookup_strategy: LookupStrategy::Standard,
         };
         let engine = ChewingEngine {
+            #[cfg(feature = "d512")]
+            d512: Default::default(),
             word_lattice_builder,
             decoder: Decoder {
                 lm: StaticLm::new(),
@@ -435,6 +480,8 @@ mod tests {
             lookup_strategy: LookupStrategy::Standard,
         };
         let engine = ChewingEngine {
+            #[cfg(feature = "d512")]
+            d512: Default::default(),
             word_lattice_builder,
             decoder: Decoder {
                 lm: StaticLm::new(),
@@ -519,6 +566,8 @@ mod tests {
             lookup_strategy: LookupStrategy::Standard,
         };
         let engine = ChewingEngine {
+            #[cfg(feature = "d512")]
+            d512: Default::default(),
             word_lattice_builder,
             decoder: Decoder {
                 lm: StaticLm::new(),
@@ -539,5 +588,67 @@ mod tests {
         // assert_eq!(1, outcomes.len());
         // The cheapest segmentation pairs every ㄏㄚ into 哈哈 -> 40 intervals.
         assert_eq!(40, outcomes[0].intervals.len());
+    }
+    #[cfg(feature = "d512")]
+    #[test]
+    fn d512_hook_reranks_real_decoder_and_respects_manual_choice() {
+        use crate::d512::{D512Error, D512Options, SentenceRequest, SentenceScorer};
+        struct PreferWatch;
+        impl SentenceScorer for PreferWatch {
+            fn score(
+                &mut self,
+                r: &SentenceRequest,
+                _deadline: std::time::Instant,
+            ) -> Result<Vec<f64>, D512Error> {
+                assert_eq!(r.context, "前文");
+                Ok(r.candidates
+                    .iter()
+                    .map(|s| if s.contains('錶') { 1000. } else { 0. })
+                    .collect())
+            }
+        }
+        let strings = StringTable::new();
+        let dict = test_dictionary(strings.clone());
+        let mut engine = ChewingEngine {
+            word_lattice_builder: LatticeBuilder {
+                dict,
+                lookup_strategy: LookupStrategy::Standard,
+            },
+            decoder: Decoder {
+                lm: StaticLm::new(),
+                hist: HistoryDict::new(strings.clone()),
+                lambda: Decoder::LAMBDA,
+            },
+            string_table: strings.clone(),
+            d512: Default::default(),
+        };
+        let mut com = Composition::new();
+        com.push(Symbol::from(syl![D, AI, TONE4]));
+        com.push(Symbol::from(syl![B, I, AU, TONE3]));
+        let baseline = engine.convert(&com);
+        engine
+            .set_sentence_scorer(Some(Box::new(PreferWatch)), D512Options::default())
+            .unwrap();
+        engine.set_d512_context("前文");
+        let ranked = engine.convert(&com);
+        let text: String = ranked[0]
+            .intervals
+            .iter()
+            .map(|i| i.text.as_ref())
+            .collect();
+        assert!(text.contains('錶'));
+        assert_ne!(ranked[0], baseline[0]);
+        com.push_selection(Selection {
+            start: 0,
+            end: 2,
+            wid: strings.intern("代表"),
+        });
+        let fixed = engine.convert(&com);
+        let text: String = fixed[0].intervals.iter().map(|i| i.text.as_ref()).collect();
+        assert_eq!(text, "代表");
+        engine
+            .set_sentence_scorer(None, D512Options::default())
+            .unwrap();
+        assert_eq!(engine.convert(&com), fixed);
     }
 }

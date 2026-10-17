@@ -166,6 +166,8 @@ pub struct Editor {
 
 #[derive(Debug)]
 pub(crate) struct SharedState {
+    #[cfg(feature = "d512")]
+    d512: crate::d512::SharedD512State,
     // static_words_path: PathBuf,
     // static_dict_path: PathBuf,
     user_datadir: Option<PathBuf>,
@@ -298,6 +300,8 @@ impl Editor {
             };
 
             let conversion_engine = Box::new(ChewingEngine {
+                #[cfg(feature = "d512")]
+                d512: Default::default(),
                 word_lattice_builder,
                 decoder: decoder.clone(),
                 string_table: string_table.clone(),
@@ -338,8 +342,17 @@ impl Editor {
         abbr: AbbrevTable,
         sym_sel: SymbolSelector,
     ) -> Editor {
+        #[cfg(feature = "d512")]
+        let (conv, d512) = {
+            let state = crate::d512::SharedD512State::default();
+            let mut conv = conv;
+            conv.set_d512_state(state.clone());
+            (conv, state)
+        };
         Editor {
             shared: SharedState {
+                #[cfg(feature = "d512")]
+                d512,
                 user_datadir,
                 com: CompositionEditor::default(),
                 syl: Box::new(Standard::new()),
@@ -365,6 +378,31 @@ impl Editor {
 
     pub fn fallback() -> Editor {
         EditorBuilder::new().build()
+    }
+
+    /// Installs a caller-owned sentence scorer. `None` restores native conversion.
+    #[cfg(feature = "d512")]
+    pub fn set_sentence_scorer(
+        &mut self,
+        scorer: Option<Box<dyn crate::d512::SentenceScorer + Send>>,
+        options: crate::d512::D512Options,
+    ) -> Result<(), crate::d512::D512Error> {
+        self.shared
+            .d512
+            .lock()
+            .map_err(|_| crate::d512::D512Error::Busy)?
+            .configure(scorer, options)
+    }
+    /// Confirmed text to the left of this composition; never use preedit text.
+    #[cfg(feature = "d512")]
+    pub fn set_d512_context(&mut self, context: &str) {
+        if let Ok(mut s) = self.shared.d512.lock() {
+            s.set_context(context);
+        }
+    }
+    #[cfg(feature = "d512")]
+    pub fn d512_report(&self) -> Option<crate::d512::D512Report> {
+        self.shared.d512.try_lock().ok()?.report()
     }
 
     pub fn keybindings_default() -> Vec<Keybinding> {
@@ -396,6 +434,8 @@ impl Editor {
     }
     pub fn set_conversion_engine(&mut self, engine: Box<dyn ConversionEngine>) {
         self.shared.conv = engine;
+        #[cfg(feature = "d512")]
+        self.shared.conv.set_d512_state(self.shared.d512.clone());
         info!("Set conversion engine: {:?}", self.shared.conv);
     }
     pub fn clear(&mut self) {
@@ -407,6 +447,10 @@ impl Editor {
     }
     pub fn clear_composition_editor(&mut self) {
         self.shared.com.clear();
+        #[cfg(feature = "d512")]
+        if let Ok(mut state) = self.shared.d512.lock() {
+            state.invalidate();
+        }
     }
     pub fn clear_syllable_editor(&mut self) {
         self.shared.syl.clear();
@@ -435,6 +479,8 @@ impl Editor {
                     dict: self.shared.dict.clone(),
                 }),
                 ConversionEngineKind::ChewingEngine => Box::new(ChewingEngine {
+                    #[cfg(feature = "d512")]
+                    d512: Default::default(),
                     word_lattice_builder: LatticeBuilder {
                         dict: self.shared.dict.clone(),
                         lookup_strategy: LookupStrategy::Standard,
@@ -443,6 +489,8 @@ impl Editor {
                     string_table: self.shared.string_table.clone(),
                 }),
                 ConversionEngineKind::FuzzyChewingEngine => Box::new(ChewingEngine {
+                    #[cfg(feature = "d512")]
+                    d512: Default::default(),
                     word_lattice_builder: LatticeBuilder {
                         dict: self.shared.dict.clone(),
                         lookup_strategy: LookupStrategy::FuzzyPartialPrefix,
@@ -450,7 +498,9 @@ impl Editor {
                     decoder: self.shared.decoder.clone(),
                     string_table: self.shared.string_table.clone(),
                 }),
-            }
+            };
+            #[cfg(feature = "d512")]
+            self.shared.conv.set_d512_state(self.shared.d512.clone());
         }
     }
     pub fn entering_syllable(&self) -> bool {
@@ -785,6 +835,10 @@ impl Editor {
 
 impl SharedState {
     fn clear(&mut self) {
+        #[cfg(feature = "d512")]
+        if let Ok(mut state) = self.d512.lock() {
+            state.invalidate();
+        }
         self.last_key_behavior = EditorKeyBehavior::Absorb;
         self.com.clear();
         self.syl.clear();
@@ -959,6 +1013,10 @@ impl SharedState {
             .collect::<String>();
         self.commit_buffer.push_str(&output);
         self.com.clear();
+        #[cfg(feature = "d512")]
+        if let Ok(mut state) = self.d512.lock() {
+            state.invalidate();
+        }
         self.nth_conversion = 0;
         self.last_key_behavior = EditorKeyBehavior::Commit;
     }
@@ -1957,6 +2015,8 @@ impl EditorBuilder {
             lambda: Decoder::LAMBDA,
         };
         let conversion_engine = Box::new(ChewingEngine {
+            #[cfg(feature = "d512")]
+            d512: Default::default(),
             word_lattice_builder,
             decoder: decoder.clone(),
             string_table: self.string_table.clone(),
@@ -2774,5 +2834,65 @@ mod tests {
         // Two codepoints but only one character, so it cannot match two
         // syllables
         assert!(editor.learn_phrase(&syllables, IVS_CE).is_err());
+    }
+}
+
+#[cfg(all(test, feature = "d512"))]
+mod d512_editor_tests {
+    use super::*;
+    use crate::{d512::*, syl, zhuyin::Bopomofo::*};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    struct Probe(Arc<AtomicUsize>);
+    impl SentenceScorer for Probe {
+        fn score(
+            &mut self,
+            r: &SentenceRequest,
+            _deadline: std::time::Instant,
+        ) -> Result<Vec<f64>, D512Error> {
+            assert_eq!(r.context, "前文");
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(vec![0.; r.candidates.len()])
+        }
+    }
+    #[test]
+    fn scorer_survives_both_editor_engine_switch_apis_and_clear_invalidates_report() {
+        let mut editor = Editor::fallback();
+        let calls = Arc::new(AtomicUsize::new(0));
+        editor
+            .set_sentence_scorer(Some(Box::new(Probe(calls.clone()))), D512Options::default())
+            .unwrap();
+        editor.set_d512_context("前文");
+        let mut com = crate::conversion::Composition::new();
+        com.push(Symbol::from(syl![D, AI, TONE4]));
+        com.push(Symbol::from(syl![B, I, AU, TONE3]));
+        com.push_selection(Selection {
+            start: 0,
+            end: 2,
+            wid: editor.shared.string_table.intern("代表"),
+        });
+        editor.shared.conv.convert(&com);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        editor.set_editor_options(|o| o.conversion_engine = ConversionEngineKind::SimpleEngine);
+        editor.set_editor_options(|o| o.conversion_engine = ConversionEngineKind::ChewingEngine);
+        editor.shared.conv.convert(&com);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        let engine = ChewingEngine {
+            word_lattice_builder: LatticeBuilder {
+                dict: editor.shared.dict.clone(),
+                lookup_strategy: LookupStrategy::Standard,
+            },
+            decoder: editor.shared.decoder.clone(),
+            string_table: editor.shared.string_table.clone(),
+            d512: Default::default(),
+        };
+        editor.set_conversion_engine(Box::new(engine));
+        editor.shared.conv.convert(&com);
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+        assert!(editor.d512_report().is_some());
+        editor.clear();
+        assert!(editor.d512_report().is_none());
     }
 }

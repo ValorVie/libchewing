@@ -69,3 +69,5 @@ pub mod model;
 pub mod path;
 pub mod user;
 pub mod zhuyin;
+#[cfg(feature = "d512")]
+pub mod d512;

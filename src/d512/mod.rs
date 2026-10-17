@@ -1,0 +1,447 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
+//! Optional D512 sentence reranking; tensor protocol follows the MIT model card.
+use crate::{
+    conversion::{Composition, Outcome},
+    dictionary::StringTable,
+};
+use std::{
+    fmt,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+
+#[cfg(feature = "d512-ort")]
+mod onnx;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum D512Mode {
+    Off,
+    Automatic,
+    Suggestion,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct D512Options {
+    pub mode: D512Mode,
+    pub weight: f64,
+    pub margin: f64,
+    pub timeout: Duration,
+}
+impl Default for D512Options {
+    fn default() -> Self {
+        Self {
+            mode: D512Mode::Automatic,
+            weight: 0.25,
+            margin: 0.25,
+            timeout: Duration::from_millis(100),
+        }
+    }
+}
+
+pub struct SentenceRequest {
+    pub context: String,
+    pub reading: Vec<String>,
+    pub candidates: Vec<String>,
+}
+impl fmt::Debug for SentenceRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SentenceRequest")
+            .field("syllables", &self.reading.len())
+            .field("candidates", &self.candidates.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Return one finite natural-log score per candidate, in the given order.
+/// Implementations must bound transport/inference by `deadline`, return an
+/// error without retries, and must not log or persist request text.
+pub trait SentenceScorer: Send {
+    fn score(
+        &mut self,
+        request: &SentenceRequest,
+        deadline: Instant,
+    ) -> Result<Vec<f64>, D512Error>;
+}
+
+#[derive(Clone)]
+pub struct D512Suggestion {
+    pub text: String,
+    pub outcome_index: usize,
+    pub fused_gap: f64,
+}
+impl fmt::Debug for D512Suggestion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("D512Suggestion")
+            .field("outcome_index", &self.outcome_index)
+            .field("fused_gap", &self.fused_gap)
+            .finish_non_exhaustive()
+    }
+}
+#[derive(Debug, Clone)]
+pub struct D512Report {
+    pub selected_index: usize,
+    pub suggestion: Option<D512Suggestion>,
+    pub fallback: Option<D512Error>,
+    pub candidate_indices: Vec<usize>,
+    pub model_scores: Vec<f64>,
+    pub elapsed: Duration,
+}
+
+/// Shared by an editor and its conversion engine, including after engine switches.
+#[derive(Default)]
+pub struct D512State {
+    scorer: Option<Box<dyn SentenceScorer + Send>>,
+    options: D512Options,
+    context: String,
+    last: Option<D512Report>,
+}
+impl fmt::Debug for D512State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("D512State")
+            .field("configured", &self.scorer.is_some())
+            .field("options", &self.options)
+            .finish_non_exhaustive()
+    }
+}
+impl D512State {
+    pub(crate) fn configure(
+        &mut self,
+        scorer: Option<Box<dyn SentenceScorer + Send>>,
+        options: D512Options,
+    ) -> Result<(), D512Error> {
+        self.scorer = None;
+        self.last = None;
+        if !options.weight.is_finite()
+            || !options.margin.is_finite()
+            || options.weight < 0.
+            || options.margin < 0.
+            || options.timeout.is_zero()
+            || options.timeout > Duration::from_secs(5)
+        {
+            return Err(D512Error::InvalidConfig);
+        }
+        self.options = options;
+        self.scorer = scorer;
+        Ok(())
+    }
+    pub(crate) fn set_context(&mut self, context: &str) {
+        self.context = context
+            .chars()
+            .rev()
+            .take(64)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        self.last = None;
+    }
+    pub(crate) fn report(&self) -> Option<D512Report> {
+        self.last.clone()
+    }
+    pub(crate) fn invalidate(&mut self) {
+        self.last = None;
+    }
+    pub(crate) fn rerank(
+        &mut self,
+        com: &Composition,
+        strings: &StringTable,
+        mut outcomes: Vec<Outcome>,
+    ) -> Vec<Outcome> {
+        self.last = None;
+        if self.options.mode == D512Mode::Off || self.scorer.is_none() {
+            return outcomes;
+        }
+        let start = Instant::now();
+        let deadline = start + self.options.timeout;
+        let mut report = D512Report {
+            selected_index: 0,
+            suggestion: None,
+            fallback: None,
+            candidate_indices: vec![],
+            model_scores: vec![],
+            elapsed: Duration::ZERO,
+        };
+        let attempt = (|| -> Result<(), D512Error> {
+            if com.is_empty() || com.len() > 32 || outcomes.is_empty() {
+                return Err(D512Error::OutOfLimits);
+            }
+            let reading: Vec<String> = com
+                .symbols()
+                .iter()
+                .map(|s| {
+                    s.to_syllable()
+                        .map(|s| s.to_string().trim_end_matches('ˉ').to_owned())
+                        .ok_or(D512Error::BadReading)
+                })
+                .collect::<Result<_, _>>()?;
+            let mut candidates = vec![];
+            let mut engine = vec![];
+            for (i, out) in outcomes.iter().enumerate() {
+                let text: String = out.intervals.iter().map(|it| it.text.as_ref()).collect();
+                if text.chars().count() != reading.len() {
+                    return Err(D512Error::OutOfLimits);
+                }
+                for sel in com.selections() {
+                    let fixed = strings.get_text(sel.wid).ok_or(D512Error::ProtectedRange)?;
+                    let actual: String = text
+                        .chars()
+                        .skip(sel.start)
+                        .take(sel.end.saturating_sub(sel.start))
+                        .collect();
+                    if actual != fixed || sel.end > reading.len() || sel.start >= sel.end {
+                        return Err(D512Error::ProtectedRange);
+                    }
+                }
+                if candidates.contains(&text) {
+                    continue;
+                }
+                candidates.push(text);
+                engine.push(-out.cost);
+                report.candidate_indices.push(i);
+            }
+            if candidates.len() > 16 {
+                return Err(D512Error::OutOfLimits);
+            }
+            let req = SentenceRequest {
+                context: self.context.clone(),
+                reading,
+                candidates,
+            };
+            let model = self
+                .scorer
+                .as_mut()
+                .ok_or(D512Error::Inference)?
+                .score(&req, deadline)?;
+            if Instant::now() >= deadline {
+                return Err(D512Error::Timeout);
+            }
+            let (chosen, gap) = choose(&engine, &model, self.options.weight, self.options.margin)?;
+            report.model_scores = model;
+            if chosen != 0 {
+                report.selected_index = report.candidate_indices[chosen];
+                report.suggestion = Some(D512Suggestion {
+                    text: req.candidates[chosen].clone(),
+                    outcome_index: report.selected_index,
+                    fused_gap: gap,
+                });
+            }
+            Ok(())
+        })();
+        if let Err(error) = attempt {
+            report.fallback = Some(error);
+            report.selected_index = 0;
+            report.suggestion = None;
+        }
+        if report.selected_index != 0 {
+            let winner = outcomes.remove(report.selected_index);
+            outcomes.insert(0, winner);
+        }
+        report.elapsed = start.elapsed();
+        self.last = Some(report);
+        outcomes
+    }
+}
+
+pub type SharedD512State = Arc<Mutex<D512State>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum D512Error {
+    InvalidConfig,
+    MissingFiles,
+    InvalidModel,
+    RuntimeUnavailable,
+    TelemetryNotDisabled,
+    OutOfLimits,
+    Oov,
+    BadReading,
+    ProtectedRange,
+    Timeout,
+    Busy,
+    NonFinite,
+    Inference,
+}
+impl fmt::Display for D512Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "D512 {self:?}")
+    }
+}
+impl std::error::Error for D512Error {}
+
+fn choose(
+    engine: &[f64],
+    model: &[f64],
+    weight: f64,
+    margin: f64,
+) -> Result<(usize, f64), D512Error> {
+    if engine.is_empty()
+        || engine.len() != model.len()
+        || !weight.is_finite()
+        || !margin.is_finite()
+        || weight < 0.
+        || margin < 0.
+    {
+        return Err(D512Error::InvalidConfig);
+    }
+    if engine.iter().chain(model).any(|s| !s.is_finite()) {
+        return Err(D512Error::NonFinite);
+    }
+    if engine.iter().any(|s| *s > engine[0]) {
+        return Err(D512Error::InvalidConfig);
+    }
+    let scores: Vec<_> = engine
+        .iter()
+        .zip(model)
+        .map(|(e, m)| e + weight * m)
+        .collect();
+    if scores.iter().any(|s| !s.is_finite()) {
+        return Err(D512Error::NonFinite);
+    }
+    let best = (1..scores.len()).fold(0, |best, i| if scores[i] > scores[best] { i } else { best });
+    let gap = scores[best] - scores[0];
+    Ok((if best != 0 && gap > margin { best } else { 0 }, gap))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        conversion::{Interval, Selection, Symbol},
+        syl,
+        zhuyin::Bopomofo::*,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Fake {
+        calls: Arc<AtomicUsize>,
+        response: Result<Vec<f64>, D512Error>,
+        delay: Duration,
+    }
+    impl SentenceScorer for Fake {
+        fn score(&mut self, r: &SentenceRequest, _d: Instant) -> Result<Vec<f64>, D512Error> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(r.reading.len(), 2);
+            std::thread::sleep(self.delay);
+            self.response.clone()
+        }
+    }
+    fn fixture(
+        response: Result<Vec<f64>, D512Error>,
+        delay: Duration,
+    ) -> (
+        D512State,
+        Arc<AtomicUsize>,
+        Composition,
+        StringTable,
+        Vec<Outcome>,
+    ) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut state = D512State::default();
+        state
+            .configure(
+                Some(Box::new(Fake {
+                    calls: calls.clone(),
+                    response,
+                    delay,
+                })),
+                D512Options::default(),
+            )
+            .unwrap();
+        let mut com = Composition::new();
+        com.push(Symbol::from(syl![D, AI, TONE4]));
+        com.push(Symbol::from(syl![B, I, AU, TONE3]));
+        let outs = [("代表", 2.), ("代錶", 3.)]
+            .into_iter()
+            .map(|(s, cost)| Outcome {
+                cost,
+                intervals: vec![Interval {
+                    start: 0,
+                    end: 2,
+                    text: s.into(),
+                    is_phrase: true,
+                }],
+            })
+            .collect();
+        (state, calls, com, StringTable::new(), outs)
+    }
+    fn text(out: &Outcome) -> String {
+        out.intervals.iter().map(|i| i.text.as_ref()).collect()
+    }
+
+    #[test]
+    fn adapter_applies_model_and_exposes_suggestion() {
+        let (mut s, calls, com, strings, out) = fixture(Ok(vec![-10., -2.]), Duration::ZERO);
+        let ranked = s.rerank(&com, &strings, out);
+        assert_eq!(text(&ranked[0]), "代錶");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let report = s.report().unwrap();
+        assert_eq!(report.selected_index, 1);
+        assert_eq!(report.suggestion.unwrap().fused_gap, 1.0);
+    }
+
+    #[test]
+    fn scorer_errors_bad_lengths_nonfinite_and_late_results_keep_original_order() {
+        for response in [
+            Err(D512Error::Inference),
+            Err(D512Error::Timeout),
+            Ok(vec![0.]),
+            Ok(vec![0., f64::NAN]),
+        ] {
+            let (mut s, _, com, strings, out) = fixture(response, Duration::ZERO);
+            let original = out.clone();
+            assert_eq!(s.rerank(&com, &strings, out), original);
+            assert!(s.report().unwrap().fallback.is_some());
+        }
+        let (mut s, _, com, strings, out) = fixture(Ok(vec![-10., -2.]), Duration::from_millis(5));
+        s.options.timeout = Duration::from_millis(1);
+        let original = out.clone();
+        assert_eq!(s.rerank(&com, &strings, out), original);
+        assert_eq!(s.report().unwrap().fallback, Some(D512Error::Timeout));
+    }
+
+    #[test]
+    fn off_and_absent_scorer_do_not_call_transport() {
+        let (mut s, calls, com, strings, out) = fixture(Ok(vec![-10., -2.]), Duration::ZERO);
+        s.options.mode = D512Mode::Off;
+        let original = out.clone();
+        assert_eq!(s.rerank(&com, &strings, out), original);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn manual_ranges_are_checked_before_scoring() {
+        let (mut s, calls, mut com, strings, out) = fixture(Ok(vec![-10., -2.]), Duration::ZERO);
+        let wid = strings.intern("表");
+        com.push_selection(Selection {
+            start: 1,
+            end: 2,
+            wid,
+        });
+        let original = out.clone();
+        assert_eq!(s.rerank(&com, &strings, out), original);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            s.report().unwrap().fallback,
+            Some(D512Error::ProtectedRange)
+        );
+    }
+
+    #[test]
+    fn fusion_uses_log10_cost_scale_and_strict_margin() {
+        assert_eq!(choose(&[-2., -3.], &[-10., -2.], 0.25, 0.25), Ok((1, 1.0)));
+        assert_eq!(choose(&[-2., -3.], &[-10., -5.], 0.25, 0.25), Ok((0, 0.25)));
+        assert_eq!(choose(&[-2., -3.], &[-10., -2.], 0., 0.), Ok((0, 0.0)));
+    }
+
+    #[test]
+    fn invalid_or_nonfinite_fusion_never_changes_baseline() {
+        for (e, m, w, t) in [
+            (vec![-2., -1.], vec![1., 2.], 0.25, 0.25),
+            (vec![-2.], vec![f64::NAN], 0.25, 0.25),
+            (vec![-2.], vec![], 0.25, 0.25),
+            (vec![-2.], vec![1.], f64::INFINITY, 0.25),
+            (vec![-2.], vec![1.], 0.25, -1.),
+        ] {
+            assert!(choose(&e, &m, w, t).is_err());
+        }
+    }
+}

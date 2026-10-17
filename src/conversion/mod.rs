@@ -24,6 +24,8 @@ mod word_lattice;
 /// put intervals should cover the whole range of inputs, sorted in first in
 /// first out order.
 pub trait ConversionEngine: Debug {
+    #[cfg(feature = "d512")]
+    fn set_d512_state(&mut self, _state: crate::d512::SharedD512State) {}
     fn convert<'a>(&'a self, comp: &'a Composition) -> Vec<Outcome>;
 }
 

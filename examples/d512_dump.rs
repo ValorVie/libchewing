@@ -75,6 +75,8 @@ fn system_engine(dir: &Path) -> Result<ChewingEngine, Box<dyn Error>> {
         UserDict::new(strings.clone()),
     );
     Ok(ChewingEngine {
+        #[cfg(feature = "d512")]
+        d512: Default::default(),
         word_lattice_builder: LatticeBuilder {
             dict,
             lookup_strategy: LookupStrategy::Standard,
