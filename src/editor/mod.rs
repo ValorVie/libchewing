@@ -3048,6 +3048,26 @@ mod d512_editor_tests {
         assert_ne!(history_bytes(&editor), history);
     }
     #[test]
+    fn suggestion_accept_display_getters_do_not_rescore() {
+        let (mut editor, calls) = editor_in_mode(D512Mode::Suggestion);
+        let text = editor.d512_report().unwrap().suggestion.unwrap().text;
+        let count = calls.load(Ordering::Relaxed);
+        assert!(editor.accept_d512_suggestion());
+        assert_eq!(calls.load(Ordering::Relaxed), count);
+        for _ in 0..2 {
+            let _ = editor.cursor();
+            let _ = editor.syllable_buffer_display();
+            assert_eq!(editor.intervals().map(|i| i.text).collect::<String>(), text);
+            assert_eq!(editor.display(), text);
+            assert_eq!(editor.display_commit(), "");
+            assert_eq!(calls.load(Ordering::Relaxed), count);
+        }
+        let report = editor.d512_report().unwrap();
+        assert!(report.suggestion.is_none());
+        assert!(report.fallback.is_none());
+        assert!(report.model_scores.is_empty());
+    }
+    #[test]
     fn suggestion_rejects_all_stale_edit_paths_without_changes() {
         for case in 0..4 {
             let (mut editor, calls) = editor_in_mode(D512Mode::Suggestion);
@@ -3309,23 +3329,7 @@ mod d512_editor_tests {
     }
     #[test]
     fn scorer_survives_both_editor_engine_switch_apis_and_clear_invalidates_report() {
-        let mut editor = Editor::fallback();
-        let calls = Arc::new(AtomicUsize::new(0));
-        editor
-            .set_sentence_scorer(Some(Box::new(Probe(calls.clone()))), D512Options::default())
-            .unwrap();
-        editor.set_d512_context("前文");
-        editor.shared.com.insert(Symbol::from(syl![D, AI, TONE4]));
-        editor
-            .shared
-            .com
-            .insert(Symbol::from(syl![B, I, AU, TONE3]));
-        editor.shared.com.select(Selection {
-            start: 0,
-            end: 2,
-            wid: editor.shared.string_table.intern("代表"),
-        });
-        editor.shared.hypotheses();
+        let (mut editor, calls) = suggesting_editor();
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         editor.set_editor_options(|o| o.conversion_engine = ConversionEngineKind::SimpleEngine);
         editor.set_editor_options(|o| o.conversion_engine = ConversionEngineKind::ChewingEngine);

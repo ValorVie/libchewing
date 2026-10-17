@@ -256,6 +256,9 @@ impl D512State {
             if candidates.len() > 16 {
                 return Err(D512Error::OutOfLimits);
             }
+            if candidates.len() < 2 {
+                return Ok(());
+            }
             let req = SentenceRequest {
                 context: self.context.clone(),
                 reading,
@@ -467,6 +470,29 @@ mod tests {
         let (mut state, _, com, strings, out) = fixture(Ok(vec![-10., -4.]), Duration::ZERO);
         assert_eq!(state.rerank(&com, &strings, out.clone()), out);
         assert!(state.report().unwrap().suggestion.is_none());
+    }
+
+    #[test]
+    fn single_unique_candidate_does_not_call_scorer() {
+        for mode in [D512Mode::Automatic, D512Mode::Suggestion] {
+            for duplicate in [false, true] {
+                let (mut state, calls, com, strings, mut out) =
+                    fixture(Err(D512Error::Inference), Duration::ZERO);
+                state.options.mode = mode;
+                out.truncate(1);
+                if duplicate {
+                    out.push(out[0].clone());
+                }
+                assert_eq!(state.rerank(&com, &strings, out.clone()), out);
+                assert_eq!(calls.load(Ordering::Relaxed), 0);
+                let report = state.report().unwrap();
+                assert_eq!(report.selected_index, 0);
+                assert_eq!(report.candidate_indices, [0]);
+                assert!(report.suggestion.is_none());
+                assert!(report.fallback.is_none());
+                assert!(report.model_scores.is_empty());
+            }
+        }
     }
 
     #[test]
