@@ -89,6 +89,25 @@ pub struct D512Report {
     pub elapsed: Duration,
 }
 
+// Input identity of the last completed scoring attempt; never printed by Debug.
+struct ReportSnapshot {
+    composition: Composition,
+    committed_prefix: u64,
+}
+impl ReportSnapshot {
+    fn matches(&self, current: &Composition, committed_prefix: u64) -> bool {
+        self.committed_prefix == committed_prefix
+            && self.composition.symbols() == current.symbols()
+            && self.composition.gaps() == current.gaps()
+            && self
+                .composition
+                .selections()
+                .iter()
+                .map(|s| (s.start, s.end, s.wid))
+                .eq(current.selections().iter().map(|s| (s.start, s.end, s.wid)))
+    }
+}
+
 /// Shared by an editor and its conversion engine, including after engine switches.
 #[derive(Default)]
 pub struct D512State {
@@ -96,6 +115,8 @@ pub struct D512State {
     options: D512Options,
     context: String,
     last: Option<D512Report>,
+    report_snapshot: Option<ReportSnapshot>,
+    editor_committed_prefix: u64,
 }
 impl fmt::Debug for D512State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -112,7 +133,7 @@ impl D512State {
         options: D512Options,
     ) -> Result<(), D512Error> {
         self.scorer = None;
-        self.last = None;
+        self.invalidate();
         if !options.weight.is_finite()
             || !options.margin.is_finite()
             || options.weight < 0.
@@ -135,13 +156,31 @@ impl D512State {
             .into_iter()
             .rev()
             .collect();
-        self.last = None;
+        self.invalidate();
     }
     pub(crate) fn report(&self) -> Option<D512Report> {
         self.last.clone()
     }
+    pub(crate) fn set_editor_prefix(&mut self, committed_prefix: u64) {
+        self.editor_committed_prefix = committed_prefix;
+    }
+    pub(crate) fn report_for(
+        &self,
+        current: &Composition,
+        committed_prefix: u64,
+    ) -> Option<D512Report> {
+        if !self
+            .report_snapshot
+            .as_ref()?
+            .matches(current, committed_prefix)
+        {
+            return None;
+        }
+        self.report()
+    }
     pub(crate) fn invalidate(&mut self) {
         self.last = None;
+        self.report_snapshot = None;
     }
     pub(crate) fn rerank(
         &mut self,
@@ -149,7 +188,7 @@ impl D512State {
         strings: &StringTable,
         mut outcomes: Vec<Outcome>,
     ) -> Vec<Outcome> {
-        self.last = None;
+        self.invalidate();
         if self.options.mode == D512Mode::Off || self.scorer.is_none() {
             return outcomes;
         }
@@ -238,6 +277,10 @@ impl D512State {
             let winner = outcomes.remove(report.selected_index);
             outcomes.insert(0, winner);
         }
+        self.report_snapshot = Some(ReportSnapshot {
+            composition: com.clone(),
+            committed_prefix: self.editor_committed_prefix,
+        });
         report.elapsed = start.elapsed();
         self.last = Some(report);
         outcomes

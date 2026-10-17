@@ -17,6 +17,8 @@ pub(crate) struct CompositionEditor {
     cursor_stack: Vec<usize>,
     /// TODO
     inner: Composition,
+    #[cfg(feature = "d512")]
+    committed_prefix: u64,
 }
 
 impl Display for CompositionEditor {
@@ -49,6 +51,10 @@ impl Display for CompositionEditor {
 }
 
 impl CompositionEditor {
+    #[cfg(feature = "d512")]
+    pub(crate) fn committed_prefix(&self) -> u64 {
+        self.committed_prefix
+    }
     pub(crate) fn to_composition(&self) -> Composition {
         self.inner.clone()
     }
@@ -115,6 +121,11 @@ impl CompositionEditor {
     }
     pub(crate) fn remove_front(&mut self, n: usize) {
         self.inner.remove_front(n);
+        #[cfg(feature = "d512")]
+        {
+            // Preserve the origin when identical symbols are inserted again.
+            self.committed_prefix = self.committed_prefix.wrapping_add(n as u64);
+        }
         self.cursor = self.cursor.saturating_sub(n);
     }
     pub(crate) fn remove_after_cursor(&mut self) {

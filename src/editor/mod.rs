@@ -402,7 +402,11 @@ impl Editor {
     }
     #[cfg(feature = "d512")]
     pub fn d512_report(&self) -> Option<crate::d512::D512Report> {
-        self.shared.d512.try_lock().ok()?.report()
+        self.shared
+            .d512
+            .try_lock()
+            .ok()?
+            .report_for(self.shared.com.as_ref(), self.shared.com.committed_prefix())
     }
 
     pub fn keybindings_default() -> Vec<Keybinding> {
@@ -853,13 +857,17 @@ impl SharedState {
         self.nth_conversion = 0;
     }
     fn conversion(&self) -> Vec<Interval> {
-        let paths = self.conv.convert(self.com.as_ref());
+        let paths = self.hypotheses();
         if paths.is_empty() {
             return vec![];
         }
         paths[self.nth_conversion % paths.len()].intervals.clone()
     }
     fn hypotheses(&self) -> Vec<Outcome> {
+        #[cfg(feature = "d512")]
+        if let Ok(mut state) = self.d512.try_lock() {
+            state.set_editor_prefix(self.com.committed_prefix());
+        }
         self.conv.convert(self.com.as_ref())
     }
     fn intervals(&self) -> impl DoubleEndedIterator<Item = Interval> + use<> {
@@ -2846,7 +2854,7 @@ mod d512_editor_tests {
         d512::*,
         dictionary::StringTableBuilder,
         input::{
-            keycode::KEY_ESC,
+            keycode::{KEY_BACKSPACE, KEY_ESC},
             keymap::{QWERTY_MAP, map_ascii},
         },
         lm::StaticDictBuilder,
@@ -2978,6 +2986,71 @@ mod d512_editor_tests {
         assert_native_switch_invalidated(editor, calls);
     }
     #[test]
+    fn report_snapshot_rejects_backspace_to_empty_without_mutating_report() {
+        let (mut editor, calls) = suggesting_editor();
+        editor.process_keyevent(
+            KeyboardEvent::builder()
+                .code(KEY_BACKSPACE)
+                .ksym(SYM_BACKSPACE)
+                .build(),
+        );
+        assert!(editor.is_empty());
+        let before = calls.load(Ordering::Relaxed);
+        assert!(editor.d512_report().is_none());
+        assert!(editor.d512_report().is_none());
+        assert_eq!(calls.load(Ordering::Relaxed), before);
+        // Reading freshness must not erase the scorer's last attempt.
+        assert!(editor.shared.d512.lock().unwrap().report().is_some());
+    }
+    #[test]
+    fn report_snapshot_rejects_manual_selection() {
+        let (mut editor, _) = suggesting_editor();
+        let previous = editor.d512_report().unwrap().suggestion.unwrap().text;
+        editor.start_selecting().unwrap();
+        let candidates = editor.all_candidates().unwrap();
+        let selected = candidates.iter().position(|s| s != &previous).unwrap();
+        let chosen = candidates[selected].clone();
+        editor.select(selected).unwrap();
+        let report = editor.d512_report();
+        assert_eq!(editor.display(), chosen);
+        assert!(report.is_none());
+    }
+    #[test]
+    fn report_snapshot_rejects_partial_auto_commit() {
+        let (mut editor, _) = suggesting_editor();
+        editor.set_editor_options(|o| o.auto_commit_threshold = 1);
+        for key in b"hk4" {
+            editor.process_keyevent(map_ascii(&QWERTY_MAP, *key));
+        }
+        assert_eq!(editor.len(), 1);
+        assert_eq!(editor.display_commit().chars().count(), 1);
+        assert!(editor.d512_report().is_none());
+    }
+    #[test]
+    fn report_snapshot_rejects_reading_and_gap_changes() {
+        let (mut editor, _) = suggesting_editor();
+        editor.shared.com.move_cursor_to_beginning();
+        editor.shared.com.replace(Symbol::from(syl![C, E, TONE2]));
+        assert!(editor.d512_report().is_none());
+        let (mut editor, _) = suggesting_editor();
+        for key in b"hk4" {
+            editor.process_keyevent(map_ascii(&QWERTY_MAP, *key));
+        }
+        let _ = editor.display();
+        assert!(editor.d512_report().is_some());
+        editor.shared.com.move_cursor(1);
+        editor.shared.com.insert_break();
+        assert!(editor.d512_report().is_none());
+    }
+    #[test]
+    fn report_snapshot_rejects_shifted_origin_even_with_identical_composition() {
+        let (mut editor, _) = suggesting_editor();
+        let symbol = editor.symbols()[0].clone();
+        editor.shared.com.remove_front(1);
+        editor.shared.com.insert(symbol);
+        assert!(editor.d512_report().is_none());
+    }
+    #[test]
     fn scorer_survives_both_editor_engine_switch_apis_and_clear_invalidates_report() {
         let mut editor = Editor::fallback();
         let calls = Arc::new(AtomicUsize::new(0));
@@ -2985,19 +3058,21 @@ mod d512_editor_tests {
             .set_sentence_scorer(Some(Box::new(Probe(calls.clone()))), D512Options::default())
             .unwrap();
         editor.set_d512_context("前文");
-        let mut com = crate::conversion::Composition::new();
-        com.push(Symbol::from(syl![D, AI, TONE4]));
-        com.push(Symbol::from(syl![B, I, AU, TONE3]));
-        com.push_selection(Selection {
+        editor.shared.com.insert(Symbol::from(syl![D, AI, TONE4]));
+        editor
+            .shared
+            .com
+            .insert(Symbol::from(syl![B, I, AU, TONE3]));
+        editor.shared.com.select(Selection {
             start: 0,
             end: 2,
             wid: editor.shared.string_table.intern("代表"),
         });
-        editor.shared.conv.convert(&com);
+        editor.shared.hypotheses();
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         editor.set_editor_options(|o| o.conversion_engine = ConversionEngineKind::SimpleEngine);
         editor.set_editor_options(|o| o.conversion_engine = ConversionEngineKind::ChewingEngine);
-        editor.shared.conv.convert(&com);
+        editor.shared.hypotheses();
         assert_eq!(calls.load(Ordering::Relaxed), 2);
         let engine = ChewingEngine {
             word_lattice_builder: LatticeBuilder {
@@ -3009,7 +3084,7 @@ mod d512_editor_tests {
             d512: Default::default(),
         };
         editor.set_conversion_engine(Box::new(engine));
-        editor.shared.conv.convert(&com);
+        editor.shared.hypotheses();
         assert_eq!(calls.load(Ordering::Relaxed), 3);
         assert!(editor.d512_report().is_some());
         editor.clear();
