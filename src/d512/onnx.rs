@@ -366,8 +366,11 @@ mod tests {
         let runtime = std::env::var_os("D512_ORT_LIBRARY").unwrap();
         let fixture = std::env::var_os("D512_FIXTURE").unwrap();
         let mut scorer = OrtSentenceScorer::load(Path::new(&model), Path::new(&runtime)).unwrap();
-        println!("native ORT build: {}",ort::info());
-        assert_eq!(environment(Path::new("onnxruntime.dll")).err(),Some(D512Error::RuntimeUnavailable));
+        println!("native ORT build: {}", ort::info());
+        assert_eq!(
+            environment(Path::new("onnxruntime.dll")).err(),
+            Some(D512Error::RuntimeUnavailable)
+        );
         let v = Vocab::load(Path::new(&model)).unwrap();
         let fixture: serde_json::Value =
             serde_json::from_reader(File::open(fixture).unwrap()).unwrap();
@@ -399,7 +402,7 @@ mod tests {
             let scores = scorer
                 .score(&req, Instant::now() + std::time::Duration::from_secs(5))
                 .unwrap();
-            assert_eq!(scores.len(),case["scores"].as_array().unwrap().len());
+            assert_eq!(scores.len(), case["scores"].as_array().unwrap().len());
             for (actual, expected) in scores.iter().zip(case["scores"].as_array().unwrap()) {
                 let diff = (actual - expected.as_f64().unwrap()).abs();
                 max_diff = max_diff.max(diff);
@@ -408,11 +411,22 @@ mod tests {
             }
         }
         println!("A1 fixture: {count} scores; max_abs_diff={max_diff}");
-        let req=SentenceRequest{context:"你".repeat(64),reading:vec!["ㄍㄨㄥ".into(),"ㄩㄢˊ".into()],candidates:vec!["公園".into(),"公元".into()]};
-        let start=Instant::now();
-        assert_eq!(scorer.score(&req,start+std::time::Duration::from_millis(1)),Err(D512Error::Timeout));
-        assert!(start.elapsed()<std::time::Duration::from_millis(200));
-        let recovered=scorer.score(&req,Instant::now()+std::time::Duration::from_secs(5)).unwrap();assert_eq!(recovered.len(),2);assert!(recovered.iter().all(|s|s.is_finite()));
+        let req = SentenceRequest {
+            context: "你".repeat(64),
+            reading: vec!["ㄍㄨㄥ".into(), "ㄩㄢˊ".into()],
+            candidates: vec!["公園".into(), "公元".into()],
+        };
+        let start = Instant::now();
+        assert_eq!(
+            scorer.score(&req, start + std::time::Duration::from_millis(1)),
+            Err(D512Error::Timeout)
+        );
+        assert!(start.elapsed() < std::time::Duration::from_millis(200));
+        let recovered = scorer
+            .score(&req, Instant::now() + std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(recovered.len(), 2);
+        assert!(recovered.iter().all(|s| s.is_finite()));
         println!("native 1ms deadline canceled; subsequent request recovered");
     }
     fn vocab() -> Vocab {
