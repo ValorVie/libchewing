@@ -1550,8 +1550,7 @@ impl State for EnteringSyllable {
                                 self.start_entering()
                             }
                         } else {
-                            shared.syl.clear();
-                            self.start_entering()
+                            self.spin_bell()
                         }
                     }
                     _ => self.spin_bell(),

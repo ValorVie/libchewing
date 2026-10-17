@@ -23,6 +23,8 @@ What's New in libchewing 0.14.0 (unreleased)
     `chewing.auto_learn_new_words`.
   - editor: now typing Enter while composing bopomofo will directly output the
     bopomofo symbols.
+  - editor: invalid spelling no longer clears the bopomofo buffer so user can
+    make additional corrections.
 
 What's New in libchewing 0.13.1 (July 15, 2026)
 ---------------------------------------------------------

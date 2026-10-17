@@ -1602,6 +1602,22 @@ void test_Acknowledge()
     chewing_delete(ctx);
 }
 
+void test_BellInvalidSpelling()
+{
+    ChewingContext *ctx;
+
+    ctx = chewing_new();
+    start_testcase(ctx);
+
+    type_keystroke_by_string(ctx, "cj.6i6<E>");
+    ok_commit_buffer(ctx, "活");
+
+    type_keystroke_by_string(ctx, "cu8 j <E>");
+    ok_commit_buffer(ctx, "花");
+
+    chewing_delete(ctx);
+}
+
 void test_BellCondition()
 {
     ChewingContext *ctx;
@@ -2756,6 +2772,7 @@ int main(int argc, char *argv[])
     test_FuzzySearchMode_Hanyu();
     test_SimpleEngine();
     test_Acknowledge();
+    test_BellInvalidSpelling();
     // test_BellCondition();
 
     test_get_phoneSeq();
