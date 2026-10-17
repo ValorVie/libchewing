@@ -70,12 +70,29 @@ pub struct D512Suggestion {
     pub text: String,
     pub outcome_index: usize,
     pub fused_gap: f64,
+    pub changes: Vec<D512Change>,
+}
+/// Changed winning interval; start/end use composition symbol indices, end exclusive.
+#[derive(Clone)]
+pub struct D512Change {
+    pub start: usize,
+    pub end: usize,
+    pub text: String,
+}
+impl fmt::Debug for D512Change {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("D512Change")
+            .field("start", &self.start)
+            .field("end", &self.end)
+            .finish_non_exhaustive()
+    }
 }
 impl fmt::Debug for D512Suggestion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("D512Suggestion")
             .field("outcome_index", &self.outcome_index)
             .field("fused_gap", &self.fused_gap)
+            .field("changes", &self.changes.len())
             .finish_non_exhaustive()
     }
 }
@@ -392,16 +409,42 @@ impl D512State {
                     }
                 });
                 c.applied = self.options.mode == D512Mode::Automatic && chosen != 0;
-                c.suggested = self.options.mode == D512Mode::Suggestion && chosen != 0;
             }
             report.model_scores = model;
             if chosen != 0 {
                 report.selected_index = report.candidate_indices[chosen];
-                report.suggestion = Some(D512Suggestion {
-                    text: req.candidates[chosen].clone(),
-                    outcome_index: report.selected_index,
-                    fused_gap: gap,
-                });
+                let changes: Vec<_> = outcomes[report.selected_index]
+                    .intervals
+                    .iter()
+                    .filter(|interval| {
+                        let same = outcomes[0].intervals.iter().any(|original| {
+                            original.start == interval.start
+                                && original.end == interval.end
+                                && original.text == interval.text
+                        });
+                        !same
+                            && !com.selections().iter().any(|selection| {
+                                interval.start < selection.end && selection.start < interval.end
+                            })
+                    })
+                    .map(|interval| D512Change {
+                        start: interval.start,
+                        end: interval.end,
+                        text: interval.text.to_string(),
+                    })
+                    .collect();
+                if !changes.is_empty() {
+                    report.suggestion = Some(D512Suggestion {
+                        text: req.candidates[chosen].clone(),
+                        outcome_index: report.selected_index,
+                        fused_gap: gap,
+                        changes,
+                    });
+                }
+            }
+            if let Some(c) = self.calibration.as_mut() {
+                c.suggested =
+                    self.options.mode == D512Mode::Suggestion && report.suggestion.is_some();
             }
             Ok(())
         })();
@@ -569,6 +612,169 @@ mod tests {
     }
     fn text(out: &Outcome) -> String {
         out.intervals.iter().map(|i| i.text.as_ref()).collect()
+    }
+
+    fn intervals(parts: &[(usize, usize, &str)]) -> Vec<Interval> {
+        parts
+            .iter()
+            .map(|(start, end, text)| Interval {
+                start: *start,
+                end: *end,
+                text: (*text).into(),
+                is_phrase: true,
+            })
+            .collect()
+    }
+    fn changes(suggestion: &D512Suggestion) -> Vec<(usize, usize, &str)> {
+        suggestion
+            .changes
+            .iter()
+            .map(|c| (c.start, c.end, c.text.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn hint_changes_single_word_in_both_modes_and_reused_result() {
+        for mode in [D512Mode::Automatic, D512Mode::Suggestion] {
+            let (mut state, calls, com, strings, out) =
+                fixture(Ok(vec![-10., -2.]), Duration::ZERO);
+            state.options.mode = mode;
+            state.rerank(&com, &strings, out.clone());
+            let suggestion = state.report().unwrap().suggestion.unwrap();
+            assert_eq!(suggestion.text, "代錶");
+            assert_eq!(changes(&suggestion), [(0, 2, "代錶")]);
+            state.rerank(&com, &strings, out);
+            assert_eq!(
+                changes(&state.report().unwrap().suggestion.unwrap()),
+                [(0, 2, "代錶")]
+            );
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[test]
+    fn hint_changes_multiple_words_follow_winning_path_order() {
+        let (mut state, _, com, strings, mut out) = fixture(Ok(vec![-10., -2.]), Duration::ZERO);
+        out[0].intervals = intervals(&[(0, 1, "代"), (1, 2, "表")]);
+        out[1].intervals = intervals(&[(0, 1, "帶"), (1, 2, "錶")]);
+        state.rerank(&com, &strings, out);
+        let suggestion = state.report().unwrap().suggestion.unwrap();
+        assert_eq!(changes(&suggestion), [(0, 1, "帶"), (1, 2, "錶")]);
+        let hint = suggestion
+            .changes
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join("／");
+        assert_eq!(format!("⇥ {hint}"), "⇥ 帶／錶");
+    }
+
+    #[test]
+    fn hint_changes_compare_word_ranges_for_split_and_merged_words() {
+        let (mut state, _, com, strings, mut out) = fixture(Ok(vec![-10., -2.]), Duration::ZERO);
+        out[1].intervals = intervals(&[(0, 1, "代"), (1, 2, "錶")]);
+        state.rerank(&com, &strings, out.clone());
+        assert_eq!(
+            changes(&state.report().unwrap().suggestion.unwrap()),
+            [(0, 1, "代"), (1, 2, "錶")]
+        );
+        out[0].intervals = intervals(&[(0, 1, "代"), (1, 2, "表")]);
+        out[1].intervals = intervals(&[(0, 2, "代錶")]);
+        state.rerank(&com, &strings, out);
+        assert_eq!(
+            changes(&state.report().unwrap().suggestion.unwrap()),
+            [(0, 2, "代錶")]
+        );
+    }
+
+    #[test]
+    fn hint_changes_omit_same_words_at_same_ranges() {
+        let (mut state, _, com, strings, mut out) = fixture(Ok(vec![-10., -2.]), Duration::ZERO);
+        out[0].intervals = intervals(&[(0, 1, "代"), (1, 2, "表")]);
+        out[1].intervals = intervals(&[(0, 1, "代"), (1, 2, "錶")]);
+        state.rerank(&com, &strings, out);
+        assert_eq!(
+            changes(&state.report().unwrap().suggestion.unwrap()),
+            [(1, 2, "錶")]
+        );
+    }
+
+    #[test]
+    fn hint_changes_exclude_protected_overlap_but_keep_adjacent_word() {
+        let (mut state, _, mut com, strings, mut out) =
+            fixture(Ok(vec![-10., -2.]), Duration::ZERO);
+        com.push_selection(Selection {
+            start: 0,
+            end: 1,
+            wid: strings.intern("代"),
+        });
+        out[1].intervals = intervals(&[(0, 1, "代"), (1, 2, "錶")]);
+        state.rerank(&com, &strings, out);
+        assert_eq!(
+            changes(&state.report().unwrap().suggestion.unwrap()),
+            [(1, 2, "錶")]
+        );
+    }
+
+    #[test]
+    fn hint_changes_no_eligible_words_means_no_suggestion_without_changing_choice() {
+        for mode in [D512Mode::Automatic, D512Mode::Suggestion] {
+            let (mut state, _, mut com, strings, out) =
+                fixture(Ok(vec![-10., -2.]), Duration::ZERO);
+            state.options.mode = mode;
+            com.push_selection(Selection {
+                start: 0,
+                end: 1,
+                wid: strings.intern("代"),
+            });
+            let ranked = state.rerank(&com, &strings, out.clone());
+            assert!(state.report().unwrap().suggestion.is_none());
+            assert_eq!(state.report().unwrap().selected_index, 1);
+            assert_eq!(
+                text(&ranked[0]),
+                if mode == D512Mode::Automatic {
+                    "代錶"
+                } else {
+                    "代表"
+                }
+            );
+            let calibration = state.calibration_for(&com, 0).unwrap();
+            assert!(!calibration.suggested);
+            assert_eq!(calibration.applied, mode == D512Mode::Automatic);
+            let mut same = out;
+            same[1].intervals = same[0].intervals.clone();
+            state.rerank(&com, &strings, same);
+            assert!(state.report().unwrap().suggestion.is_none());
+        }
+    }
+
+    #[test]
+    fn hint_changes_match_exact_start_for_repeated_readings() {
+        let (mut state, _, mut com, strings, mut out) =
+            fixture(Ok(vec![-10., -2.]), Duration::ZERO);
+        com.replace(1, Symbol::from(syl![D, AI, TONE4]));
+        out[0].intervals = intervals(&[(0, 1, "代"), (1, 2, "戴")]);
+        out[1].intervals = intervals(&[(0, 1, "戴"), (1, 2, "代")]);
+        state.rerank(&com, &strings, out);
+        assert_eq!(
+            changes(&state.report().unwrap().suggestion.unwrap()),
+            [(0, 1, "戴"), (1, 2, "代")]
+        );
+    }
+
+    #[test]
+    fn hint_changes_debug_redacts_standalone_and_nested_text() {
+        let change = D512Change {
+            start: 0,
+            end: 2,
+            text: "代錶".into(),
+        };
+        assert!(!format!("{change:?}").contains("代錶"));
+        let (mut state, _, com, strings, out) = fixture(Ok(vec![-10., -2.]), Duration::ZERO);
+        state.rerank(&com, &strings, out);
+        let report = state.report().unwrap();
+        let suggestion = report.suggestion.as_ref().unwrap();
+        assert!(!format!("{report:?} {suggestion:?} {:?}", suggestion.changes).contains("代錶"));
     }
 
     #[test]
