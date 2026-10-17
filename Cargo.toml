@@ -45,6 +45,7 @@ scoped-error = "0.1.5"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+serde_json = "1.0"
 
 [features]
 default = []
