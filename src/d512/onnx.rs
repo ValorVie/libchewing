@@ -27,11 +27,18 @@ use std::{
 static RUNTIME: Mutex<Option<(PathBuf, Environment)>> = Mutex::new(None);
 
 fn session_builder(env: &Environment) -> Result<SessionBuilder, D512Error> {
+    let devices: Vec<_> = env
+        .devices()
+        .filter(|d| d.ep().ok() == Some("CPUExecutionProvider"))
+        .collect();
+    if devices.is_empty() {
+        return Err(D512Error::RuntimeUnavailable);
+    }
     Session::builder(env)
         .map_err(|_| D512Error::InvalidModel)?
-        // ort rc.14 defaults to MaxEfficiency, which selects CoreML on macOS.
-        // Its CPU provider only toggles the arena; reset device policy as well.
-        .with_auto_device(ort::session::builder::AutoDevicePolicy::Default)
+        // A real CPU factory bypasses ORT auto-selection. ort's CPU provider
+        // only toggles the arena, and Default is still an automatic policy.
+        .with_devices(devices, None)
         .map_err(|_| D512Error::InvalidModel)?
         .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(true).build()])
         .map_err(|_| D512Error::InvalidModel)?
@@ -377,6 +384,9 @@ mod tests {
         let env = environment(Path::new(&runtime)).unwrap();
         let scratch = tempfile::tempdir().unwrap();
         let session = session_builder(&env)
+            .unwrap()
+            // A real CPU factory must win even if an auto-device policy is set.
+            .with_auto_device(ort::session::builder::AutoDevicePolicy::MaxEfficiency)
             .unwrap()
             .with_profiling(scratch.path().join("cpu-regression"))
             .unwrap()

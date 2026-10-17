@@ -30,7 +30,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env = ort::init_from(&a[1])?.with_telemetry(false).build()?;
     env.set_log_level(LogLevel::Info);
     let mut builder = Session::builder(&env)?
-        .with_auto_device(ort::session::builder::AutoDevicePolicy::Default)?
         .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(true).build()])?
         .with_optimization_level(GraphOptimizationLevel::All)?
         .with_intra_threads(2)?
@@ -42,6 +41,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("D512_PERF_REPRO_AUTODEVICE").as_deref() == Ok("1") {
         builder =
             builder.with_auto_device(ort::session::builder::AutoDevicePolicy::MaxEfficiency)?;
+    } else {
+        let devices: Vec<_> = env
+            .devices()
+            .filter(|d| d.ep().ok() == Some("CPUExecutionProvider"))
+            .collect();
+        assert!(!devices.is_empty());
+        builder = builder.with_devices(devices, None)?;
     }
     let mut session = builder.commit_from_file(Path::new(&a[0]).join("model.onnx"))?;
     let options = RunOptions::new()?;
