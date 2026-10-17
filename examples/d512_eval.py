@@ -24,6 +24,23 @@ def select_point(grid):
     return min(valid, key=lambda p: (-p['delta_pp'], p['w'], p['tau']))
 
 
+def select_presets(grid):
+    """Select from dev aggregates only; keep the original balanced point.
+
+    Conservative halves balanced's harmful/helpful ratio and retains positive
+    gain. Both adjustable presets maximize gain, with the existing tie order.
+    """
+    balanced = next((p for p in grid if (p['w'], p['tau']) == (.25, .25)), None)
+    if balanced is None or balanced['helpful_overrides'] == 0:
+        raise ValueError('missing usable frozen balanced point')
+    conservative = [p for p in grid
+                    if p['helpful_overrides'] > p['harmful_overrides']
+                    and 2 * p['harmful_overrides'] * balanced['helpful_overrides']
+                    <= balanced['harmful_overrides'] * p['helpful_overrides']]
+    return dict(conservative=select_point(conservative), balanced=balanced,
+                aggressive=select_point(grid))
+
+
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
