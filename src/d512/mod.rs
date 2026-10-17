@@ -12,6 +12,8 @@ use std::{
 
 #[cfg(feature = "d512-ort")]
 mod onnx;
+#[cfg(feature = "d512-ort")]
+pub use onnx::OrtSentenceScorer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum D512Mode {

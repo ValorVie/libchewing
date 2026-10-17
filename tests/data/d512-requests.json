@@ -1,0 +1,11 @@
+{
+  "license": "LGPL-2.1-or-later",
+  "cases": [
+    {"context":"今天去", "reading":["ㄍㄨㄥ","ㄩㄢˊ"], "candidates":["公園","公元"]},
+    {"context":"", "reading":["ㄅㄚˊ"], "candidates":["吧","拔"]},
+    {"context":"這件事情", "reading":["ㄕˋ"], "candidates":["是","事"]},
+    {"context":"", "reading":["ㄕˋ"], "candidates":["是","事"]},
+    {"context":"你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好𠀀", "reading":["ㄍㄨㄥ","ㄩㄢˊ"], "candidates":["公園","公元"]},
+    {"context":"", "reading":["ㄇㄚ˙"], "candidates":["嗎","媽"]}
+  ]
+}
