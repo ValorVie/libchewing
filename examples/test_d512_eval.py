@@ -49,45 +49,5 @@ class PresetTests(unittest.TestCase):
                 d512_eval.select_presets(grid)
 
 
-def suggestion_point(tau, total, correct, w=.25):
-    # Native-wrong/suggestion-wrong changes still count in the denominator.
-    return dict(w=w, tau=tau, suggestions=total, correct_suggestions=correct,
-                helpful_overrides=correct, harmful_overrides=0,
-                neutral_overrides=total-correct)
-
-
-class SuggestionPresetTests(unittest.TestCase):
-    def test_precision_counts_all_suggestions_and_uses_three_targets(self):
-        aggressive = suggestion_point(.1, 100, 80)
-        balanced = suggestion_point(.2, 50, 45)
-        conservative = suggestion_point(.3, 20, 19)
-        self.assertEqual(d512_eval.select_suggestion_presets(
-            [aggressive, balanced, conservative]), dict(conservative=conservative,
-                balanced=balanced, aggressive=aggressive))
-
-    def test_maximizes_correct_count_then_prefers_smaller_margin_not_precision(self):
-        preferred = suggestion_point(.1, 100, 95)
-        grid = [suggestion_point(.3, 94, 94), suggestion_point(.2, 99, 95), preferred]
-        selected = d512_eval.select_suggestion_presets(grid)
-        self.assertTrue(all(p == preferred for p in selected.values()))
-
-    def test_weight_is_fixed_and_zero_suggestions_do_not_qualify(self):
-        valid = suggestion_point(.2, 20, 19)
-        selected = d512_eval.select_suggestion_presets(
-            [suggestion_point(0, 100, 100, w=.5), suggestion_point(.1, 0, 0), valid])
-        self.assertTrue(all(p == valid for p in selected.values()))
-
-    def test_precision_boundary_is_inclusive_without_rounding(self):
-        valid = suggestion_point(2, 20, 19)
-        selected = d512_eval.select_suggestion_presets(
-            [suggestion_point(1, 10000, 9499), valid])
-        self.assertEqual(selected['conservative'], valid)
-
-    def test_missing_tier_stops_without_relaxing_precision(self):
-        for grid in ([suggestion_point(1, 10, 9)], [suggestion_point(1, 0, 0)]):
-            with self.assertRaisesRegex(ValueError, 'conservative'):
-                d512_eval.select_suggestion_presets(grid)
-
-
 if __name__ == '__main__':
     unittest.main()

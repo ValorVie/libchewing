@@ -34,7 +34,7 @@ impl Default for D512Options {
         Self {
             mode: D512Mode::Automatic,
             weight: 0.25,
-            margin: 0.25,
+            margin: 0.5,
             timeout: Duration::from_millis(100),
         }
     }
@@ -451,6 +451,22 @@ mod tests {
         let report = s.report().unwrap();
         assert_eq!(report.selected_index, 1);
         assert_eq!(report.suggestion.unwrap().fused_gap, 1.0);
+    }
+
+    #[test]
+    fn default_uses_mac_automatic_balanced_parameters() {
+        let options = D512Options::default();
+        assert_eq!(options.mode, D512Mode::Automatic);
+        assert_eq!(options.weight, 0.25);
+        assert_eq!(options.margin, 0.5);
+        assert_eq!(options.timeout, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn default_margin_requires_more_than_half_point() {
+        let (mut state, _, com, strings, out) = fixture(Ok(vec![-10., -4.]), Duration::ZERO);
+        assert_eq!(state.rerank(&com, &strings, out.clone()), out);
+        assert!(state.report().unwrap().suggestion.is_none());
     }
 
     #[test]
