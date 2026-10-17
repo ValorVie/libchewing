@@ -41,6 +41,18 @@ def select_presets(grid):
                 aggressive=select_point(grid))
 
 
+def select_suggestion_presets(grid):
+    """Maximize correct dev suggestions at fixed w=.25 under precision targets."""
+    chosen = {}
+    for name, target in [('conservative', 95), ('balanced', 90), ('aggressive', 80)]:
+        valid = [p for p in grid if p['w'] == .25 and p['suggestions'] > 0
+                 and 100 * p['correct_suggestions'] >= target * p['suggestions']]
+        if not valid:
+            raise ValueError(f'no {name} point meets suggestion precision {target}%')
+        chosen[name] = min(valid, key=lambda p: (-p['correct_suggestions'], p['tau']))
+    return chosen
+
+
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
