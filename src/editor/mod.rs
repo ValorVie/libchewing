@@ -2921,7 +2921,7 @@ mod d512_editor_tests {
         d512::*,
         dictionary::StringTableBuilder,
         input::{
-            keycode::{KEY_BACKSPACE, KEY_ESC},
+            keycode::{KEY_BACKSPACE, KEY_ENTER, KEY_ESC},
             keymap::{QWERTY_MAP, map_ascii},
         },
         lm::StaticDictBuilder,
@@ -2990,6 +2990,97 @@ mod d512_editor_tests {
         let mut bytes = vec![];
         editor.shared.hist_dict.to_writer(&mut bytes).unwrap();
         bytes
+    }
+    #[test]
+    fn commit_reuse_enter_keeps_displayed_text_when_next_score_fails() {
+        struct FailNext {
+            calls: Arc<AtomicUsize>,
+            error: Arc<std::sync::Mutex<Option<D512Error>>>,
+        }
+        impl SentenceScorer for FailNext {
+            fn score(
+                &mut self,
+                r: &SentenceRequest,
+                _: std::time::Instant,
+            ) -> Result<Vec<f64>, D512Error> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                if let Some(error) = *self.error.lock().unwrap() {
+                    return Err(error);
+                }
+                Ok((0..r.candidates.len())
+                    .map(|i| if i == 0 { -1000. } else { 0. })
+                    .collect())
+            }
+        }
+        for error in [D512Error::Inference, D512Error::Timeout, D512Error::Busy] {
+            let (mut editor, _) = suggesting_editor();
+            let (native, _) = editor_in_mode(D512Mode::Off);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let fail = Arc::new(std::sync::Mutex::new(None));
+            editor
+                .set_sentence_scorer(
+                    Some(Box::new(FailNext {
+                        calls: calls.clone(),
+                        error: fail.clone(),
+                    })),
+                    D512Options::default(),
+                )
+                .unwrap();
+            let displayed = editor.display();
+            assert_ne!(displayed, native.display());
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+            *fail.lock().unwrap() = Some(error);
+            // The TIP supplies the same confirmed-left text before every key.
+            editor.set_d512_context("前文");
+            editor.process_keyevent(
+                KeyboardEvent::builder()
+                    .code(KEY_ENTER)
+                    .ksym(SYM_RETURN)
+                    .build(),
+            );
+            assert_eq!(
+                editor.display_commit(),
+                displayed,
+                "Enter changed the displayed choice after {error:?}"
+            );
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+            assert!(editor.is_empty());
+            assert!(editor.d512_report().is_none());
+            assert!(editor.d512_calibration().is_none());
+        }
+    }
+    #[test]
+    fn commit_reuse_enter_does_not_call_scorer() {
+        let (mut editor, calls) = suggesting_editor();
+        let displayed = editor.display();
+        let count = calls.load(Ordering::Relaxed);
+        editor.set_d512_context("前文");
+        editor.process_keyevent(
+            KeyboardEvent::builder()
+                .code(KEY_ENTER)
+                .ksym(SYM_RETURN)
+                .build(),
+        );
+        assert_eq!(editor.display_commit(), displayed);
+        assert_eq!(calls.load(Ordering::Relaxed), count);
+    }
+    #[test]
+    fn commit_reuse_suggestion_enter_keeps_native_text_without_scoring() {
+        let (mut editor, calls) = editor_in_mode(D512Mode::Suggestion);
+        let displayed = editor.display();
+        let calibration = editor.d512_calibration().unwrap();
+        let count = calls.load(Ordering::Relaxed);
+        editor.set_d512_context("前文");
+        editor.process_keyevent(
+            KeyboardEvent::builder()
+                .code(KEY_ENTER)
+                .ksym(SYM_RETURN)
+                .build(),
+        );
+        assert_eq!(editor.display_commit(), displayed);
+        assert_eq!(calls.load(Ordering::Relaxed), count);
+        assert!(calibration.suggested && !calibration.applied);
+        assert!(editor.d512_calibration().is_none());
     }
     fn unchanged_on_rejection(editor: &mut Editor, calls: &AtomicUsize) {
         let before = format!(

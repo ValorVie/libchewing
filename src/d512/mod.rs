@@ -22,7 +22,7 @@ pub enum D512Mode {
     Suggestion,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct D512Options {
     pub mode: D512Mode,
     pub weight: f64,
@@ -140,10 +140,20 @@ impl fmt::Debug for D512Calibration {
 struct ReportSnapshot {
     composition: Composition,
     committed_prefix: u64,
+    context: String,
+    options: D512Options,
 }
 impl ReportSnapshot {
-    fn matches(&self, current: &Composition, committed_prefix: u64) -> bool {
+    fn matches(
+        &self,
+        current: &Composition,
+        committed_prefix: u64,
+        context: &str,
+        options: D512Options,
+    ) -> bool {
         self.committed_prefix == committed_prefix
+            && self.context == context
+            && self.options == options
             && self.composition.symbols() == current.symbols()
             && self.composition.gaps() == current.gaps()
             && self
@@ -164,6 +174,7 @@ pub struct D512State {
     last: Option<D512Report>,
     calibration: Option<D512Calibration>,
     report_snapshot: Option<ReportSnapshot>,
+    successful_native: Option<Vec<Outcome>>,
     editor_committed_prefix: u64,
     suggested_path: Option<Vec<Selection>>,
 }
@@ -197,7 +208,7 @@ impl D512State {
         Ok(())
     }
     pub(crate) fn set_context(&mut self, context: &str) {
-        self.context = context
+        let context: String = context
             .chars()
             .rev()
             .take(64)
@@ -205,7 +216,10 @@ impl D512State {
             .into_iter()
             .rev()
             .collect();
-        self.invalidate();
+        if self.context != context {
+            self.context = context;
+            self.invalidate();
+        }
     }
     pub(crate) fn report(&self) -> Option<D512Report> {
         self.last.clone()
@@ -234,9 +248,9 @@ impl D512State {
         self.calibration.clone()
     }
     fn snapshot_matches(&self, current: &Composition, committed_prefix: u64) -> bool {
-        self.report_snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.matches(current, committed_prefix))
+        self.report_snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.matches(current, committed_prefix, &self.context, self.options)
+        })
     }
     pub(crate) fn suggestion_for(
         &self,
@@ -253,6 +267,7 @@ impl D512State {
         self.last = None;
         self.calibration = None;
         self.report_snapshot = None;
+        self.successful_native = None;
         self.suggested_path = None;
     }
     pub(crate) fn rerank(
@@ -261,6 +276,16 @@ impl D512State {
         strings: &StringTable,
         mut outcomes: Vec<Outcome>,
     ) -> Vec<Outcome> {
+        if self.snapshot_matches(com, self.editor_committed_prefix)
+            && self.successful_native.as_ref() == Some(&outcomes)
+            && let Some(report) = self.last.as_ref()
+        {
+            if self.options.mode == D512Mode::Automatic && report.selected_index != 0 {
+                let winner = outcomes.remove(report.selected_index);
+                outcomes.insert(0, winner);
+            }
+            return outcomes;
+        }
         self.invalidate();
         if self.options.mode == D512Mode::Off || self.scorer.is_none() {
             return outcomes;
@@ -385,6 +410,9 @@ impl D512State {
             report.selected_index = 0;
             report.suggestion = None;
         }
+        if report.fallback.is_none() && !report.model_scores.is_empty() {
+            self.successful_native = Some(outcomes.clone());
+        }
         if report.selected_index != 0 {
             if self.options.mode == D512Mode::Suggestion {
                 self.suggested_path = outcomes[report.selected_index]
@@ -409,6 +437,8 @@ impl D512State {
         self.report_snapshot = Some(ReportSnapshot {
             composition: com.clone(),
             committed_prefix: self.editor_committed_prefix,
+            context: self.context.clone(),
+            options: self.options,
         });
         report.elapsed = start.elapsed();
         self.last = Some(report);
@@ -550,6 +580,98 @@ mod tests {
         let report = s.report().unwrap();
         assert_eq!(report.selected_index, 1);
         assert_eq!(report.suggestion.unwrap().fused_gap, 1.0);
+    }
+
+    #[test]
+    fn commit_reuse_retains_successful_report_and_calibration_in_both_modes() {
+        for mode in [D512Mode::Automatic, D512Mode::Suggestion] {
+            let (mut state, calls, com, strings, out) =
+                fixture(Ok(vec![-10., -2.]), Duration::ZERO);
+            state.options.mode = mode;
+            state.set_context("已確認前文");
+            let ranked = state.rerank(&com, &strings, out.clone());
+            assert_eq!(
+                text(&ranked[0]),
+                if mode == D512Mode::Automatic {
+                    "代錶"
+                } else {
+                    "代表"
+                }
+            );
+            let report = state.report_for(&com, 0).unwrap();
+            state.set_context("已確認前文");
+            assert!(state.report_for(&com, 0).is_some());
+            assert_eq!(state.rerank(&com, &strings, out), ranked);
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+            let reused = state.report_for(&com, 0).unwrap();
+            assert_eq!(reused.elapsed, report.elapsed);
+            assert_eq!(reused.selected_index, 1);
+            assert_eq!(reused.model_scores, [-10., -2.]);
+            assert_eq!(state.calibration_for(&com, 0).unwrap().winner_index, 1);
+        }
+    }
+
+    #[test]
+    fn commit_reuse_compares_normalized_context_and_keeps_only_last_input() {
+        let (mut state, calls, com, strings, out) = fixture(Ok(vec![-10., -2.]), Duration::ZERO);
+        let suffix = "𠮷".repeat(64);
+        state.set_context(&format!("舊{suffix}"));
+        let original = state.rerank(&com, &strings, out.clone());
+        state.set_context(&format!("新{suffix}"));
+        assert_eq!(state.rerank(&com, &strings, out.clone()), original);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let mut changed = out.clone();
+        changed[1].cost = 4.;
+        state.rerank(&com, &strings, changed);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        state.rerank(&com, &strings, out);
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn commit_reuse_rejects_changed_snapshot_context_options_or_native_paths() {
+        for case in 0..11 {
+            let (mut state, calls, mut com, strings, mut out) =
+                fixture(Ok(vec![-10., -2.]), Duration::ZERO);
+            state.rerank(&com, &strings, out.clone());
+            match case {
+                0 => state.set_context("不同前文"),
+                1 => state.options.weight = 0.5,
+                2 => state.options.margin = 2.,
+                3 => state.options.mode = D512Mode::Suggestion,
+                4 => state.options.timeout = Duration::from_millis(200),
+                5 => state.set_editor_prefix(1),
+                6 => com.replace(1, Symbol::from(syl![B, I, AU, TONE2])),
+                7 => com.set_gap(1, crate::conversion::Gap::Break),
+                8 => com.push_selection(Selection {
+                    start: 0,
+                    end: 1,
+                    wid: strings.intern("代"),
+                }),
+                9 => out[0].cost = 2.1,
+                _ => out[1].intervals[0].is_phrase = false,
+            }
+            state.rerank(&com, &strings, out);
+            assert_eq!(calls.load(Ordering::Relaxed), 2, "stale reuse case {case}");
+        }
+    }
+
+    #[test]
+    fn commit_reuse_does_not_turn_failed_attempts_into_successful_hits() {
+        let (mut state, calls, com, strings, out) =
+            fixture(Err(D512Error::Inference), Duration::ZERO);
+        assert_eq!(state.rerank(&com, &strings, out.clone()), out);
+        assert_eq!(state.rerank(&com, &strings, out.clone()), out);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(state.report().unwrap().fallback, Some(D512Error::Inference));
+        assert!(
+            state
+                .calibration_for(&com, 0)
+                .unwrap()
+                .candidates
+                .iter()
+                .all(|c| c.model_logp.is_none())
+        );
     }
 
     #[test]
