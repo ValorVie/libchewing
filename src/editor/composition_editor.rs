@@ -134,10 +134,13 @@ impl CompositionEditor {
         self.cursor = 0;
     }
     pub(crate) fn move_cursor_left(&mut self, n: usize) {
-        self.cursor = self.cursor.saturating_sub(n);
+        self.cursor = self.cursor.wrapping_sub(n).min(self.inner.len());
     }
     pub(crate) fn move_cursor_right(&mut self, n: usize) {
-        self.cursor = self.cursor.saturating_add(n).min(self.inner.len());
+        self.cursor = self.cursor.saturating_add(n);
+        if self.cursor > self.inner.len() {
+            self.cursor = 0;
+        }
     }
     pub(crate) fn insert(&mut self, sym: Symbol) {
         self.inner.insert(self.cursor, sym);
