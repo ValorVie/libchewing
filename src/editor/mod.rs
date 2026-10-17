@@ -433,9 +433,7 @@ impl Editor {
         info!("Set syllable editor: {}", self.shared.syl);
     }
     pub fn set_conversion_engine(&mut self, engine: Box<dyn ConversionEngine>) {
-        self.shared.conv = engine;
-        #[cfg(feature = "d512")]
-        self.shared.conv.set_d512_state(self.shared.d512.clone());
+        self.shared.set_conversion_engine(engine);
         info!("Set conversion engine: {:?}", self.shared.conv);
     }
     pub fn clear(&mut self) {
@@ -446,11 +444,7 @@ impl Editor {
         self.shared.commit_buffer.clear();
     }
     pub fn clear_composition_editor(&mut self) {
-        self.shared.com.clear();
-        #[cfg(feature = "d512")]
-        if let Ok(mut state) = self.shared.d512.lock() {
-            state.invalidate();
-        }
+        self.shared.clear_composition();
     }
     pub fn clear_syllable_editor(&mut self) {
         self.shared.syl.clear();
@@ -473,7 +467,7 @@ impl Editor {
             self.cancel_entering_syllable();
         }
         if self.shared.options.conversion_engine != old.conversion_engine {
-            self.shared.conv = match self.shared.options.conversion_engine {
+            let engine: Box<dyn ConversionEngine> = match self.shared.options.conversion_engine {
                 ConversionEngineKind::SimpleEngine => Box::new(SimpleEngine {
                     string_table: self.shared.string_table.clone(),
                     dict: self.shared.dict.clone(),
@@ -499,8 +493,7 @@ impl Editor {
                     string_table: self.shared.string_table.clone(),
                 }),
             };
-            #[cfg(feature = "d512")]
-            self.shared.conv.set_d512_state(self.shared.d512.clone());
+            self.shared.set_conversion_engine(engine);
         }
     }
     pub fn entering_syllable(&self) -> bool {
@@ -834,13 +827,26 @@ impl Editor {
 }
 
 impl SharedState {
-    fn clear(&mut self) {
+    fn set_conversion_engine(&mut self, engine: Box<dyn ConversionEngine>) {
+        self.conv = engine;
+        #[cfg(feature = "d512")]
+        {
+            if let Ok(mut state) = self.d512.lock() {
+                state.invalidate();
+            }
+            self.conv.set_d512_state(self.d512.clone());
+        }
+    }
+    fn clear_composition(&mut self) {
+        self.com.clear();
         #[cfg(feature = "d512")]
         if let Ok(mut state) = self.d512.lock() {
             state.invalidate();
         }
+    }
+    fn clear(&mut self) {
         self.last_key_behavior = EditorKeyBehavior::Absorb;
-        self.com.clear();
+        self.clear_composition();
         self.syl.clear();
         self.commit_buffer.clear();
         self.notice_buffer.clear();
@@ -1012,11 +1018,7 @@ impl SharedState {
             .map(|interval| interval.text)
             .collect::<String>();
         self.commit_buffer.push_str(&output);
-        self.com.clear();
-        #[cfg(feature = "d512")]
-        if let Ok(mut state) = self.d512.lock() {
-            state.invalidate();
-        }
+        self.clear_composition();
         self.nth_conversion = 0;
         self.last_key_behavior = EditorKeyBehavior::Commit;
     }
@@ -1386,7 +1388,7 @@ impl State for Entering {
             }
             SYM_ESC => {
                 if shared.options.esc_clear_all_buffer && !shared.com.is_empty() {
-                    shared.com.clear();
+                    shared.clear_composition();
                     self.spin_absorb()
                 } else {
                     self.spin_ignore()
@@ -1562,7 +1564,7 @@ impl State for EnteringSyllable {
             SYM_ESC => {
                 shared.syl.clear();
                 if shared.options.esc_clear_all_buffer {
-                    shared.com.clear();
+                    shared.clear_composition();
                 }
                 self.start_entering()
             }
@@ -1871,7 +1873,7 @@ impl State for Selecting {
                 shared.cancel_selecting();
                 shared.com.pop_cursor();
                 if shared.options.conversion_engine == ConversionEngineKind::SimpleEngine {
-                    shared.com.clear();
+                    shared.clear_composition();
                 }
                 self.start_entering()
             }
@@ -2840,7 +2842,17 @@ mod tests {
 #[cfg(all(test, feature = "d512"))]
 mod d512_editor_tests {
     use super::*;
-    use crate::{d512::*, syl, zhuyin::Bopomofo::*};
+    use crate::{
+        d512::*,
+        dictionary::StringTableBuilder,
+        input::{
+            keycode::KEY_ESC,
+            keymap::{QWERTY_MAP, map_ascii},
+        },
+        lm::StaticDictBuilder,
+        syl,
+        zhuyin::Bopomofo::*,
+    };
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -2854,8 +2866,116 @@ mod d512_editor_tests {
         ) -> Result<Vec<f64>, D512Error> {
             assert_eq!(r.context, "前文");
             self.0.fetch_add(1, Ordering::Relaxed);
-            Ok(vec![0.; r.candidates.len()])
+            Ok((0..r.candidates.len())
+                .map(|i| if i == 0 { -1000. } else { 0. })
+                .collect())
         }
+    }
+    fn suggesting_editor() -> (Editor, Arc<AtomicUsize>) {
+        let mut strings = StringTableBuilder::new();
+        strings.insert("冊");
+        strings.insert("測");
+        let strings = strings.build();
+        let mut dict = StaticDictBuilder::new();
+        for word in ["冊", "測"] {
+            dict.insert(&[syl![C, E, TONE4]], strings.get_wid(word).unwrap());
+        }
+        let mut editor = EditorBuilder::new()
+            .string_table(strings)
+            .static_dict(dict.build())
+            .build();
+        editor.set_editor_options(|o| {
+            o.auto_snapshot_selections = false;
+            o.esc_clear_all_buffer = true;
+        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        editor
+            .set_sentence_scorer(Some(Box::new(Probe(calls.clone()))), D512Options::default())
+            .unwrap();
+        editor.set_d512_context("前文");
+        for key in b"hk4" {
+            editor.process_keyevent(map_ascii(&QWERTY_MAP, *key));
+        }
+        let _ = editor.display();
+        assert!(editor.d512_report().unwrap().suggestion.is_some());
+        (editor, calls)
+    }
+    fn press_escape(editor: &mut Editor) {
+        editor.process_keyevent(KeyboardEvent::builder().code(KEY_ESC).ksym(SYM_ESC).build());
+    }
+    fn assert_native_switch_invalidated(mut editor: Editor, calls: Arc<AtomicUsize>) {
+        assert!(
+            editor.d512_report().is_none(),
+            "converter switch retained previous report"
+        );
+        let before = calls.load(Ordering::Relaxed);
+        let _ = editor.display();
+        assert!(
+            editor.d512_report().is_none(),
+            "native-only display retained previous report"
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), before);
+        let engine = ChewingEngine {
+            word_lattice_builder: LatticeBuilder {
+                dict: editor.shared.dict.clone(),
+                lookup_strategy: LookupStrategy::Standard,
+            },
+            decoder: editor.shared.decoder.clone(),
+            string_table: editor.shared.string_table.clone(),
+            d512: Default::default(),
+        };
+        editor.set_conversion_engine(Box::new(engine));
+        assert!(editor.d512_report().is_none());
+        let _ = editor.display();
+        assert!(editor.d512_report().unwrap().suggestion.is_some());
+        assert!(calls.load(Ordering::Relaxed) > before);
+    }
+    #[test]
+    fn escape_clear_invalidates_d512_report() {
+        let (mut editor, _) = suggesting_editor();
+        press_escape(&mut editor);
+        assert!(editor.is_empty());
+        assert!(editor.d512_report().is_none());
+    }
+    #[test]
+    fn escape_during_syllable_clear_invalidates_d512_report() {
+        let (mut editor, _) = suggesting_editor();
+        editor.process_keyevent(map_ascii(&QWERTY_MAP, b'h'));
+        assert!(editor.entering_syllable());
+        press_escape(&mut editor);
+        assert!(editor.is_empty());
+        assert!(!editor.entering_syllable());
+        assert!(editor.d512_report().is_none());
+    }
+    #[test]
+    fn simple_switch_invalidates_d512_report() {
+        let (mut editor, calls) = suggesting_editor();
+        editor.set_editor_options(|o| o.conversion_engine = ConversionEngineKind::SimpleEngine);
+        assert_native_switch_invalidated(editor, calls);
+    }
+    #[test]
+    fn fuzzy_switch_invalidates_d512_report() {
+        let (mut editor, calls) = suggesting_editor();
+        editor
+            .set_editor_options(|o| o.conversion_engine = ConversionEngineKind::FuzzyChewingEngine);
+        assert_native_switch_invalidated(editor, calls);
+    }
+    #[test]
+    fn external_switch_invalidates_d512_report() {
+        #[derive(Debug)]
+        struct External(SimpleEngine);
+        impl ConversionEngine for External {
+            fn convert(&self, comp: &crate::conversion::Composition) -> Vec<Outcome> {
+                self.0.convert(comp)
+            }
+        }
+        let (mut editor, calls) = suggesting_editor();
+        let external = External(SimpleEngine {
+            string_table: editor.shared.string_table.clone(),
+            dict: editor.shared.dict.clone(),
+        });
+        editor.set_conversion_engine(Box::new(external));
+        assert_native_switch_invalidated(editor, calls);
     }
     #[test]
     fn scorer_survives_both_editor_engine_switch_apis_and_clear_invalidates_report() {
