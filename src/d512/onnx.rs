@@ -4,7 +4,10 @@ use super::SentenceScorer;
 use super::{D512Error, SentenceRequest};
 use ort::{
     environment::Environment,
-    session::{RunOptions, Session, builder::GraphOptimizationLevel},
+    session::{
+        RunOptions, Session,
+        builder::{GraphOptimizationLevel, SessionBuilder},
+    },
     value::Tensor,
 };
 use sha2::{Digest, Sha256};
@@ -22,6 +25,23 @@ use std::{
 };
 
 static RUNTIME: Mutex<Option<(PathBuf, Environment)>> = Mutex::new(None);
+
+fn session_builder(env: &Environment) -> Result<SessionBuilder, D512Error> {
+    Session::builder(env)
+        .map_err(|_| D512Error::InvalidModel)?
+        // ort rc.14 defaults to MaxEfficiency, which selects CoreML on macOS.
+        // Its CPU provider only toggles the arena; reset device policy as well.
+        .with_auto_device(ort::session::builder::AutoDevicePolicy::Default)
+        .map_err(|_| D512Error::InvalidModel)?
+        .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(true).build()])
+        .map_err(|_| D512Error::InvalidModel)?
+        .with_optimization_level(GraphOptimizationLevel::All)
+        .map_err(|_| D512Error::InvalidModel)?
+        .with_intra_threads(2)
+        .map_err(|_| D512Error::InvalidModel)?
+        .with_inter_threads(1)
+        .map_err(|_| D512Error::InvalidModel)
+}
 
 fn environment(path: &Path) -> Result<Environment, D512Error> {
     // Rust 2024 forbids mutating a Unix process environment while other threads
@@ -70,16 +90,7 @@ impl OrtSentenceScorer {
         verify_model(model_directory)?;
         let vocab = Vocab::load(model_directory)?;
         let env = environment(runtime_library)?;
-        let session = Session::builder(&env)
-            .map_err(|_| D512Error::InvalidModel)?
-            .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(true).build()])
-            .map_err(|_| D512Error::InvalidModel)?
-            .with_optimization_level(GraphOptimizationLevel::All)
-            .map_err(|_| D512Error::InvalidModel)?
-            .with_intra_threads(2)
-            .map_err(|_| D512Error::InvalidModel)?
-            .with_inter_threads(1)
-            .map_err(|_| D512Error::InvalidModel)?
+        let session = session_builder(&env)?
             .commit_from_file(model_directory.join("model.onnx"))
             .map_err(|_| D512Error::InvalidModel)?;
         Ok(Self {
@@ -358,6 +369,47 @@ fn encode(context: &[i64], sounds: &[(i64, i64)], candidate: &[i64]) -> Input {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires D512_MODEL_DIR, D512_ORT_LIBRARY and ORT_DISABLE_TELEMETRY=1"]
+    fn session_uses_only_cpu_kernels() {
+        let model = std::env::var_os("D512_MODEL_DIR").unwrap();
+        let runtime = std::env::var_os("D512_ORT_LIBRARY").unwrap();
+        let env = environment(Path::new(&runtime)).unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session_builder(&env)
+            .unwrap()
+            .with_profiling(scratch.path().join("cpu-regression"))
+            .unwrap()
+            .commit_from_file(Path::new(&model).join("model.onnx"))
+            .unwrap();
+        let mut scorer = OrtSentenceScorer {
+            vocab: Vocab::load(Path::new(&model)).unwrap(),
+            session,
+            _environment: env,
+        };
+        let req = SentenceRequest {
+            context: "今天去".into(),
+            reading: vec!["ㄍㄨㄥ".into(), "ㄩㄢˊ".into()],
+            candidates: vec!["公園".into(), "公元".into()],
+        };
+        scorer
+            .score(&req, Instant::now() + std::time::Duration::from_secs(5))
+            .unwrap();
+        let profile = scorer.session.end_profiling().unwrap();
+        let events: Vec<serde_json::Value> =
+            serde_json::from_reader(File::open(profile).unwrap()).unwrap();
+        let providers: HashSet<_> = events
+            .iter()
+            .filter(|e| e["cat"] == "Node")
+            .filter_map(|e| e["args"]["provider"].as_str())
+            .collect();
+        assert!(
+            !providers.is_empty(),
+            "profile must contain executed kernels"
+        );
+        assert_eq!(providers, HashSet::from(["CPUExecutionProvider"]));
+    }
+
     #[test]
     #[ignore = "requires D512_MODEL_DIR, D512_ORT_LIBRARY, D512_FIXTURE and ORT_DISABLE_TELEMETRY=1"]
     fn a1_tensor_and_score_fixture() {
