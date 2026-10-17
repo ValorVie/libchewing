@@ -7,7 +7,7 @@ use std::{
     fs::{self, File},
     hash::{BuildHasher, Hasher, RandomState},
     io::{BufReader, BufWriter},
-    mem,
+    ops::Deref,
     path::PathBuf,
 };
 
@@ -37,7 +37,7 @@ use crate::{
     lm::{LoadMode, StaticDict, StaticLm},
     path::SearchPath,
     user::{HistoryDict, UserDict, migrate_v3_to_v4, should_migrate_from_v3},
-    zhuyin::{Syllable, SyllableVec},
+    zhuyin::Syllable,
 };
 
 mod abbrev;
@@ -80,6 +80,8 @@ pub struct EditorOptions {
     pub auto_shift_cursor: bool,
     pub phrase_choice_rearward: bool,
     pub disable_auto_learn_phrase: bool,
+    pub auto_learn_new_words: bool,
+    pub auto_learn_user_history: bool,
     pub auto_commit_threshold: usize,
     pub candidates_per_page: usize,
     pub language_mode: LanguageMode,
@@ -100,6 +102,8 @@ impl Default for EditorOptions {
             auto_shift_cursor: false,
             phrase_choice_rearward: false,
             disable_auto_learn_phrase: false,
+            auto_learn_new_words: false,
+            auto_learn_user_history: true,
             auto_commit_threshold: 39,
             candidates_per_page: 10,
             language_mode: LanguageMode::Chinese,
@@ -946,7 +950,7 @@ impl SharedState {
         self.commit_buffer.clear();
         let intervals = self.conversion();
         debug!("commit {}", self.com);
-        if !self.options.disable_auto_learn_phrase {
+        if !self.options.disable_auto_learn_phrase && self.options.auto_learn_user_history {
             self.auto_learn(&intervals);
         }
         let output = intervals
@@ -983,53 +987,72 @@ impl SharedState {
     }
     fn auto_learn(&mut self, intervals: &[Interval]) {
         let g = self.hist_dict.new_gen();
-        let mut prev: Option<String> = None;
-        for (syllables, word) in collect_new_phrases(intervals, self.com.symbols()) {
-            self.hist_dict.observe_unigram(g, &syllables, &word);
-            if let Some(prev) = prev {
-                self.hist_dict.observe_bigram(g, &prev, &word);
+        debug!("intervals {:?}", intervals);
+        for subclause in intervals.chunk_by(|a, b| a.is_phrase && b.is_phrase) {
+            if !subclause[0].is_phrase {
+                continue;
             }
-            prev = Some(word);
-            self.dirty_level += 1;
+            let iter = if self.options.auto_learn_new_words {
+                collect_new_words(subclause, self.com.symbols())
+            } else {
+                collect_words(subclause, self.com.symbols())
+            };
+            let mut prev: Option<String> = None;
+            for (syllables, word) in iter {
+                debug!("autolearn unigram {:?} as {}", &syllables, &word);
+                self.hist_dict.observe_unigram(g, &syllables, &word);
+                if let Some(prev) = prev {
+                    debug!("autolearn bigram ({}, {})", prev, word);
+                    self.hist_dict.observe_bigram(g, &prev, &word);
+                }
+                prev = Some(word);
+                self.dirty_level += 1;
+            }
         }
     }
 }
 
-fn collect_new_phrases(intervals: &[Interval], symbols: &[Symbol]) -> Vec<(Vec<Syllable>, String)> {
-    debug!("intervals {:?}", intervals);
-    let mut pending = String::new();
-    let mut syllables = Vec::new();
+fn collect_words(intervals: &[Interval], symbols: &[Symbol]) -> Vec<(Vec<Syllable>, String)> {
     let mut phrases = vec![];
-    let mut collect = |syllables, pending| {
-        if !phrases.iter().any(|(_, p)| p == &pending) {
-            debug!("autolearn {:?} as {}", &syllables, &pending);
-            phrases.push((syllables, pending))
-        }
-    };
-    // Step 1. collect all intervals
-    for interval in intervals.iter().filter(|it| it.len() > 1 && it.is_phrase) {
+    for interval in intervals {
         let syllables = symbols[interval.start..interval.end]
             .iter()
             .map(|s| s.to_syllable().unwrap())
             .collect();
         let pending = interval.text.clone().into_string();
-        collect(syllables, pending);
+        phrases.push((syllables, pending))
     }
-    // Step 2. collect all intervals with length one including break words
-    for interval in intervals {
-        if interval.is_phrase && interval.len() == 1 && syllables.len() < SyllableVec::MAX_LEN {
-            pending.push_str(&interval.text);
-            syllables.extend(
-                symbols[interval.start..interval.end]
-                    .iter()
-                    .map(|s| s.to_syllable().unwrap()),
-            );
-        } else if !pending.is_empty() {
-            collect(mem::take(&mut syllables), mem::take(&mut pending));
+    phrases
+}
+
+fn collect_new_words(intervals: &[Interval], symbols: &[Symbol]) -> Vec<(Vec<Syllable>, String)> {
+    let mut phrases = vec![];
+    let mut collect = |syllables, pending| {
+        if !phrases.iter().any(|(_, p)| p == &pending) {
+            phrases.push((syllables, pending))
         }
-    }
-    if !pending.is_empty() {
-        collect(syllables, pending);
+    };
+    for part in intervals.chunk_by(|a, b| a.len() == 1 && b.len() == 1) {
+        if part.len() == 1 {
+            let interval = &part[0];
+            let syllables = symbols[interval.start..interval.end]
+                .iter()
+                .map(|s| s.to_syllable().unwrap())
+                .collect();
+            let pending = interval.text.clone().into_string();
+            collect(syllables, pending);
+        } else {
+            let syllables = part
+                .iter()
+                .flat_map(|it| {
+                    symbols[it.start..it.end]
+                        .iter()
+                        .map(|s| s.to_syllable().unwrap())
+                })
+                .collect();
+            let pending = part.iter().map(|it| it.text.deref()).collect();
+            collect(syllables, pending);
+        }
     }
     phrases
 }
@@ -1953,11 +1976,12 @@ impl_context_error!(pub NewEditorError);
 #[cfg(test)]
 mod tests {
     use super::BasicEditor;
-    use super::collect_new_phrases;
+    use super::collect_new_words;
     use crate::dictionary::LookupStrategy;
     use crate::dictionary::StringTable;
     use crate::dictionary::StringTableBuilder;
     use crate::editor::SymbolSelector;
+    use crate::editor::collect_words;
     use crate::editor::{EditorBuilder, LanguageMode};
     use crate::lm::StaticDictBuilder;
     use crate::user::UserDict;
@@ -2389,7 +2413,7 @@ mod tests {
             Symbol::Syllable(syl![bpmf::ZH, bpmf::EN]),
             Symbol::Syllable(syl![bpmf::H, bpmf::AU, bpmf::TONE3]),
         ];
-        let phrases = collect_new_phrases(&intervals, &symbols);
+        let phrases = collect_new_words(&intervals, &symbols);
         assert_eq!(
             vec![
                 (
@@ -2455,7 +2479,7 @@ mod tests {
             Symbol::Syllable(syl![bpmf::T, bpmf::I, bpmf::AN]),
             Symbol::Syllable(syl![bpmf::Q, bpmf::I, bpmf::TONE4]),
         ];
-        let phrases = collect_new_phrases(&intervals, &symbols);
+        let phrases = collect_new_words(&intervals, &symbols);
         assert_eq!(
             vec![
                 (
@@ -2467,18 +2491,83 @@ mod tests {
                 ),
                 (
                     vec![
+                        syl![bpmf::I, bpmf::EH, bpmf::TONE3],
+                        syl![bpmf::SH, bpmf::TONE4]
+                    ],
+                    "也是".to_string()
+                ),
+                (
+                    vec![
                         syl![bpmf::H, bpmf::AU, bpmf::TONE3],
                         syl![bpmf::T, bpmf::I, bpmf::AN],
                         syl![bpmf::Q, bpmf::I, bpmf::TONE4],
                     ],
                     "好天氣".to_string()
                 ),
+            ],
+            phrases
+        );
+    }
+
+    #[test]
+    fn collect_words_test() {
+        let intervals = [
+            Interval {
+                start: 0,
+                end: 2,
+                is_phrase: true,
+                text: "今天".into(),
+            },
+            Interval {
+                start: 2,
+                end: 3,
+                is_phrase: true,
+                text: "也".into(),
+            },
+            Interval {
+                start: 3,
+                end: 4,
+                is_phrase: true,
+                text: "是".into(),
+            },
+            Interval {
+                start: 4,
+                end: 7,
+                is_phrase: true,
+                text: "好天氣".into(),
+            },
+        ];
+        let symbols = [
+            Symbol::Syllable(syl![bpmf::J, bpmf::I, bpmf::EN]),
+            Symbol::Syllable(syl![bpmf::T, bpmf::I, bpmf::AN]),
+            Symbol::Syllable(syl![bpmf::I, bpmf::EH, bpmf::TONE3]),
+            Symbol::Syllable(syl![bpmf::SH, bpmf::TONE4]),
+            Symbol::Syllable(syl![bpmf::H, bpmf::AU, bpmf::TONE3]),
+            Symbol::Syllable(syl![bpmf::T, bpmf::I, bpmf::AN]),
+            Symbol::Syllable(syl![bpmf::Q, bpmf::I, bpmf::TONE4]),
+        ];
+        let phrases = collect_words(&intervals, &symbols);
+        assert_eq!(
+            vec![
                 (
                     vec![
-                        syl![bpmf::I, bpmf::EH, bpmf::TONE3],
-                        syl![bpmf::SH, bpmf::TONE4]
+                        syl![bpmf::J, bpmf::I, bpmf::EN],
+                        syl![bpmf::T, bpmf::I, bpmf::AN],
                     ],
-                    "也是".to_string()
+                    "今天".to_string()
+                ),
+                (
+                    vec![syl![bpmf::I, bpmf::EH, bpmf::TONE3],],
+                    "也".to_string()
+                ),
+                (vec![syl![bpmf::SH, bpmf::TONE4]], "是".to_string()),
+                (
+                    vec![
+                        syl![bpmf::H, bpmf::AU, bpmf::TONE3],
+                        syl![bpmf::T, bpmf::I, bpmf::AN],
+                        syl![bpmf::Q, bpmf::I, bpmf::TONE4],
+                    ],
+                    "好天氣".to_string()
                 ),
             ],
             phrases

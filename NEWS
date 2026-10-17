@@ -19,6 +19,8 @@ What's New in libchewing 0.14.0 (unreleased)
     for details.
   - BREAKING: the `enabled_dicts` parameter of `chewing_new3()` is now an no-op.
   - editor: added initial support for custom keybindings.
+  - editor: added new options `chewing.auto_learn_user_history` and
+    `chewing.auto_learn_new_words`.
 
 What's New in libchewing 0.13.1 (July 15, 2026)
 ---------------------------------------------------------
