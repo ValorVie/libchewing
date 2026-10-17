@@ -89,6 +89,53 @@ pub struct D512Report {
     pub elapsed: Duration,
 }
 
+/// Candidate scores in first-occurrence native text order.
+#[derive(Clone)]
+pub struct D512CalibrationCandidate {
+    pub text: String,
+    pub raw: f64,
+    pub model_logp: Option<f64>,
+    pub fused: Option<f64>,
+}
+impl fmt::Debug for D512CalibrationCandidate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("D512CalibrationCandidate")
+            .field("raw", &self.raw)
+            .field("model_logp", &self.model_logp)
+            .field("fused", &self.fused)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Latest actual scoring attempt; contains sensitive text, never printed by Debug.
+#[derive(Clone)]
+pub struct D512Calibration {
+    pub reading: Vec<String>,
+    pub candidates: Vec<D512CalibrationCandidate>,
+    pub default_index: usize,
+    pub winner_index: usize,
+    pub applied: bool,
+    pub suggested: bool,
+    pub weight: f64,
+    pub margin: f64,
+    pub mode: D512Mode,
+}
+impl fmt::Debug for D512Calibration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("D512Calibration")
+            .field("syllables", &self.reading.len())
+            .field("candidates", &self.candidates.len())
+            .field("default_index", &self.default_index)
+            .field("winner_index", &self.winner_index)
+            .field("applied", &self.applied)
+            .field("suggested", &self.suggested)
+            .field("weight", &self.weight)
+            .field("margin", &self.margin)
+            .field("mode", &self.mode)
+            .finish_non_exhaustive()
+    }
+}
+
 // Input identity of the last completed scoring attempt; never printed by Debug.
 struct ReportSnapshot {
     composition: Composition,
@@ -115,6 +162,7 @@ pub struct D512State {
     options: D512Options,
     context: String,
     last: Option<D512Report>,
+    calibration: Option<D512Calibration>,
     report_snapshot: Option<ReportSnapshot>,
     editor_committed_prefix: u64,
     suggested_path: Option<Vec<Selection>>,
@@ -170,14 +218,25 @@ impl D512State {
         current: &Composition,
         committed_prefix: u64,
     ) -> Option<D512Report> {
-        if !self
-            .report_snapshot
-            .as_ref()?
-            .matches(current, committed_prefix)
-        {
+        if !self.snapshot_matches(current, committed_prefix) {
             return None;
         }
         self.report()
+    }
+    pub(crate) fn calibration_for(
+        &self,
+        current: &Composition,
+        committed_prefix: u64,
+    ) -> Option<D512Calibration> {
+        if !self.snapshot_matches(current, committed_prefix) {
+            return None;
+        }
+        self.calibration.clone()
+    }
+    fn snapshot_matches(&self, current: &Composition, committed_prefix: u64) -> bool {
+        self.report_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.matches(current, committed_prefix))
     }
     pub(crate) fn suggestion_for(
         &self,
@@ -192,6 +251,7 @@ impl D512State {
     }
     pub(crate) fn invalidate(&mut self) {
         self.last = None;
+        self.calibration = None;
         self.report_snapshot = None;
         self.suggested_path = None;
     }
@@ -264,6 +324,27 @@ impl D512State {
                 reading,
                 candidates,
             };
+            self.calibration = Some(D512Calibration {
+                reading: req.reading.clone(),
+                candidates: req
+                    .candidates
+                    .iter()
+                    .zip(&engine)
+                    .map(|(text, raw)| D512CalibrationCandidate {
+                        text: text.clone(),
+                        raw: *raw,
+                        model_logp: None,
+                        fused: None,
+                    })
+                    .collect(),
+                default_index: 0,
+                winner_index: 0,
+                applied: false,
+                suggested: false,
+                weight: self.options.weight,
+                margin: self.options.margin,
+                mode: self.options.mode,
+            });
             let model = self
                 .scorer
                 .as_mut()
@@ -273,6 +354,21 @@ impl D512State {
                 return Err(D512Error::Timeout);
             }
             let (chosen, gap) = choose(&engine, &model, self.options.weight, self.options.margin)?;
+            if let Some(c) = self.calibration.as_mut() {
+                for (candidate, model) in c.candidates.iter_mut().zip(&model) {
+                    candidate.model_logp = Some(*model);
+                    candidate.fused = Some(candidate.raw + c.weight * model);
+                }
+                c.winner_index = (1..c.candidates.len()).fold(0, |best, i| {
+                    if c.candidates[i].fused > c.candidates[best].fused {
+                        i
+                    } else {
+                        best
+                    }
+                });
+                c.applied = self.options.mode == D512Mode::Automatic && chosen != 0;
+                c.suggested = self.options.mode == D512Mode::Suggestion && chosen != 0;
+            }
             report.model_scores = model;
             if chosen != 0 {
                 report.selected_index = report.candidate_indices[chosen];
@@ -493,6 +589,101 @@ mod tests {
                 assert!(report.model_scores.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn calibration_keeps_deduplicated_scores_and_pre_margin_winner() {
+        for (mode, margin, applied, suggested) in [
+            (D512Mode::Automatic, 0.5, true, false),
+            (D512Mode::Suggestion, 0.5, false, true),
+            (D512Mode::Automatic, 2.0, false, false),
+            (D512Mode::Suggestion, 2.0, false, false),
+        ] {
+            let (mut state, calls, com, strings, mut out) =
+                fixture(Ok(vec![-10., -2.]), Duration::ZERO);
+            state.options.mode = mode;
+            state.options.margin = margin;
+            out.insert(1, out[0].clone());
+            let ranked = state.rerank(&com, &strings, out.clone());
+            let c = state.calibration_for(&com, 0).unwrap();
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+            assert_eq!(c.reading, ["ㄉㄞˋ", "ㄅㄧㄠˇ"]);
+            assert_eq!((c.default_index, c.winner_index), (0, 1));
+            assert_eq!((c.mode, c.weight, c.margin), (mode, 0.25, margin));
+            assert_eq!((c.applied, c.suggested), (applied, suggested));
+            assert_eq!(c.candidates.len(), 2);
+            for (candidate, text, raw, model, fused) in [
+                (&c.candidates[0], "代表", -2., -10., -4.5),
+                (&c.candidates[1], "代錶", -3., -2., -3.5),
+            ] {
+                assert_eq!(candidate.text, text);
+                assert_eq!(candidate.raw, raw);
+                assert_eq!(candidate.model_logp, Some(model));
+                assert_eq!(candidate.fused, Some(fused));
+            }
+            assert_eq!(text(&ranked[0]), if applied { "代錶" } else { "代表" });
+            assert_eq!(
+                state.report().unwrap().selected_index,
+                if applied || suggested { 2 } else { 0 }
+            );
+        }
+    }
+
+    #[test]
+    fn calibration_failed_scores_are_all_absent() {
+        for (response, delay) in [
+            (Err(D512Error::Inference), Duration::ZERO),
+            (Err(D512Error::Timeout), Duration::ZERO),
+            (Ok(vec![0.]), Duration::ZERO),
+            (Ok(vec![0., f64::NAN]), Duration::ZERO),
+            (Ok(vec![-10., -2.]), Duration::from_millis(5)),
+        ] {
+            let (mut state, _, com, strings, out) = fixture(response, delay);
+            state.options.timeout = Duration::from_millis(1);
+            assert_eq!(state.rerank(&com, &strings, out.clone()), out);
+            let c = state.calibration_for(&com, 0).unwrap();
+            assert_eq!(c.candidates.len(), 2);
+            assert_eq!(c.candidates[0].raw, -2.);
+            assert_eq!(c.candidates[1].raw, -3.);
+            assert!(
+                c.candidates
+                    .iter()
+                    .all(|c| c.model_logp.is_none() && c.fused.is_none())
+            );
+            assert_eq!((c.default_index, c.winner_index), (0, 0));
+            assert!(!c.applied && !c.suggested);
+        }
+    }
+
+    #[test]
+    fn calibration_debug_redacts_readings_and_candidate_text() {
+        let (mut state, _, com, strings, out) = fixture(Ok(vec![-10., -2.]), Duration::ZERO);
+        state.rerank(&com, &strings, out);
+        let c = state.calibration_for(&com, 0).unwrap();
+        let debug = format!("{c:?} {:?} {state:?}", c.candidates);
+        for sensitive in ["代表", "代錶", "ㄉㄞˋ", "ㄅㄧㄠˇ"] {
+            assert!(!debug.contains(sensitive));
+        }
+    }
+
+    #[test]
+    fn calibration_skips_unscored_evaluations_and_invalidates_old_data() {
+        let (mut state, _, com, strings, out) = fixture(Ok(vec![-10., -2.]), Duration::ZERO);
+        state.rerank(&com, &strings, out.clone());
+        assert!(state.calibration_for(&com, 0).is_some());
+        for mode in [D512Mode::Off, D512Mode::Automatic] {
+            state.options.mode = mode;
+            state.rerank(&com, &strings, out[..1].to_vec());
+            assert!(state.calibration_for(&com, 0).is_none());
+        }
+        state.rerank(&com, &strings, out.clone());
+        assert!(state.calibration_for(&com, 0).is_some());
+        state.set_context("新的前文");
+        assert!(state.calibration_for(&com, 0).is_none());
+        state.rerank(&com, &strings, out.clone());
+        state.configure(None, D512Options::default()).unwrap();
+        state.rerank(&com, &strings, out);
+        assert!(state.calibration_for(&com, 0).is_none());
     }
 
     #[test]

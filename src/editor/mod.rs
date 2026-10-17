@@ -409,6 +409,17 @@ impl Editor {
             .report_for(self.shared.com.as_ref(), self.shared.com.committed_prefix())
     }
 
+    /// Fresh scoring data for caller-controlled, opt-in calibration collection.
+    /// Does not score, consume the snapshot, write files, or send IPC.
+    #[cfg(feature = "d512")]
+    pub fn d512_calibration(&self) -> Option<crate::d512::D512Calibration> {
+        self.shared
+            .d512
+            .try_lock()
+            .ok()?
+            .calibration_for(self.shared.com.as_ref(), self.shared.com.committed_prefix())
+    }
+
     /// Accepts the fresh suggestion as explicit choices without committing text.
     /// Returns false without changing the editor when acceptance is unavailable.
     #[cfg(feature = "d512")]
@@ -3066,6 +3077,66 @@ mod d512_editor_tests {
         assert!(report.suggestion.is_none());
         assert!(report.fallback.is_none());
         assert!(report.model_scores.is_empty());
+    }
+    #[test]
+    fn calibration_editor_read_is_fresh_read_only_and_invalid_after_acceptance() {
+        let (mut editor, calls) = editor_in_mode(D512Mode::Suggestion);
+        let count = calls.load(Ordering::Relaxed);
+        for _ in 0..2 {
+            let c = editor.d512_calibration().unwrap();
+            assert_eq!(c.reading, ["ㄘㄜˋ"]);
+            assert_eq!(c.mode, D512Mode::Suggestion);
+            assert!(!c.applied && c.suggested);
+            assert_eq!(calls.load(Ordering::Relaxed), count);
+        }
+        assert!(editor.accept_d512_suggestion());
+        assert!(editor.d512_calibration().is_none());
+        let _ = editor.intervals().collect::<Vec<_>>();
+        assert!(editor.d512_calibration().is_none());
+        assert_eq!(calls.load(Ordering::Relaxed), count);
+    }
+    #[test]
+    fn calibration_editor_rejects_all_report_snapshot_changes() {
+        for case in 0..6 {
+            let (mut editor, calls) = suggesting_editor();
+            assert!(editor.d512_calibration().is_some());
+            match case {
+                0 => editor.shared.com.clear(),
+                1 => {
+                    editor.shared.com.move_cursor_to_beginning();
+                    editor.shared.com.replace(Symbol::from(syl![C, E, TONE2]));
+                }
+                2 => editor.shared.com.select(Selection {
+                    start: 0,
+                    end: 1,
+                    wid: editor.shared.string_table.get_wid("冊").unwrap(),
+                }),
+                3 => {
+                    let symbol = editor.symbols()[0].clone();
+                    editor.shared.com.remove_front(1);
+                    editor.shared.com.insert(symbol);
+                }
+                4 => {
+                    for key in b"hk4" {
+                        editor.process_keyevent(map_ascii(&QWERTY_MAP, *key));
+                    }
+                    let _ = editor.display();
+                    assert!(editor.d512_calibration().is_some());
+                    editor.shared.com.move_cursor(1);
+                    editor.shared.com.insert_break();
+                }
+                _ => editor.set_editor_options(|o| {
+                    o.conversion_engine = ConversionEngineKind::SimpleEngine
+                }),
+            }
+            let count = calls.load(Ordering::Relaxed);
+            assert!(editor.d512_report().is_none());
+            assert!(editor.d512_calibration().is_none());
+            assert!(editor.d512_calibration().is_none());
+            assert_eq!(calls.load(Ordering::Relaxed), count);
+        }
+        let (editor, _) = editor_in_mode(D512Mode::Off);
+        assert!(editor.d512_calibration().is_none());
     }
     #[test]
     fn suggestion_rejects_all_stale_edit_paths_without_changes() {
