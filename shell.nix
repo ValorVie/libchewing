@@ -14,5 +14,6 @@ pkgs.mkShell {
     ncurses
     valgrind
     lldb
+    clang-tools
   ];
 }

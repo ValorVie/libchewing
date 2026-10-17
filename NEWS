@@ -21,6 +21,8 @@ What's New in libchewing 0.14.0 (unreleased)
   - editor: added initial support for custom keybindings.
   - editor: added new options `chewing.auto_learn_user_history` and
     `chewing.auto_learn_new_words`.
+  - editor: now typing Enter while composing bopomofo will directly output the
+    bopomofo symbols.
 
 What's New in libchewing 0.13.1 (July 15, 2026)
 ---------------------------------------------------------

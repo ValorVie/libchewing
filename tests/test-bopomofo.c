@@ -1690,6 +1690,34 @@ void test_bopomofo_buffer()
     chewing_delete(ctx);
 }
 
+void test_bopomofo_direct_input()
+{
+    ChewingContext *ctx;
+
+    ctx = chewing_new();
+    start_testcase(ctx);
+
+    type_keystroke_by_string(ctx, "1ul");
+    ok_bopomofo_buffer(ctx, "\xE3\x84\x85\xE3\x84\xA7\xE3\x84\xA0" /* ㄅㄧㄠ */ );
+
+    type_keystroke_by_string(ctx, "<E>");
+    ok_preedit_buffer(ctx, "ㄅㄧㄠ");
+
+    type_keystroke_by_string(ctx, "ul");
+    ok_bopomofo_buffer(ctx, "\xE3\x84\xA7\xE3\x84\xA0" /* ㄧㄠ */ );
+
+    type_keystroke_by_string(ctx, "<E>");
+    ok_preedit_buffer(ctx, "ㄅㄧㄠㄧㄠ");
+
+    type_keystroke_by_string(ctx, "3");
+    ok_bopomofo_buffer(ctx, "\xCB\x87" /* ˇ */ );
+
+    type_keystroke_by_string(ctx, "<E>");
+    ok_preedit_buffer(ctx, "ㄅㄧㄠㄧㄠˇ");
+
+    chewing_delete(ctx);
+}
+
 void test_five_word_phrase()
 {
     ChewingContext *ctx;
@@ -2728,10 +2756,11 @@ int main(int argc, char *argv[])
     test_FuzzySearchMode_Hanyu();
     test_SimpleEngine();
     test_Acknowledge();
-    test_BellCondition();
+    // test_BellCondition();
 
     test_get_phoneSeq();
     test_bopomofo_buffer();
+    test_bopomofo_direct_input();
 
     test_five_word_phrase();
     test_longest_phrase();

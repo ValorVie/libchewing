@@ -1508,6 +1508,13 @@ impl State for EnteringSyllable {
                 }
                 self.start_entering()
             }
+            SYM_RETURN => {
+                for ch in shared.syl.read().to_string().chars() {
+                    shared.com.insert(Symbol::Grapheme(ch.to_string()));
+                }
+                shared.syl.clear();
+                self.start_entering()
+            }
             _ => {
                 let lookup_strategy = match shared.options.conversion_engine {
                     ConversionEngineKind::ChewingEngine | ConversionEngineKind::SimpleEngine => {
