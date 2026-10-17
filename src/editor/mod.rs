@@ -409,6 +409,62 @@ impl Editor {
             .report_for(self.shared.com.as_ref(), self.shared.com.committed_prefix())
     }
 
+    /// Accepts the fresh suggestion as explicit choices without committing text.
+    /// Returns false without changing the editor when acceptance is unavailable.
+    #[cfg(feature = "d512")]
+    pub fn accept_d512_suggestion(&mut self) -> bool {
+        if !self.is_entering() || self.entering_syllable() {
+            return false;
+        }
+        let Ok(state) = self.shared.d512.try_lock() else {
+            return false;
+        };
+        let current: &crate::conversion::Composition = self.shared.com.as_ref();
+        let prefix = self.shared.com.committed_prefix();
+        let Some((suggestion, path)) = state.suggestion_for(current, prefix) else {
+            return false;
+        };
+        let same =
+            |a: &Selection, b: &Selection| (a.start, a.end, a.wid) == (b.start, b.end, b.wid);
+        if current
+            .selections()
+            .iter()
+            .any(|manual| !path.iter().any(|s| same(s, manual)))
+        {
+            return false;
+        }
+        // Work on owned composition data; failed validation never edits live state.
+        let mut proposed = self.shared.com.clone();
+        let mut end = 0;
+        let mut text = String::new();
+        for selection in path {
+            if selection.start != end || selection.end <= end || selection.end > current.len() {
+                return false;
+            }
+            let Some(word) = self.shared.string_table.get_text(selection.wid) else {
+                return false;
+            };
+            if word.chars().count() != selection.len() {
+                return false;
+            }
+            text.push_str(&word);
+            end = selection.end;
+            if !current.selections().iter().any(|s| same(s, &selection)) {
+                proposed.select(selection);
+            }
+        }
+        if end != current.len()
+            || text != suggestion.text
+            || state.report_for(proposed.as_ref(), prefix).is_some()
+        {
+            return false;
+        }
+        self.shared.com = proposed;
+        self.shared.nth_conversion = 0;
+        self.shared.last_key_behavior = EditorKeyBehavior::Absorb;
+        true
+    }
+
     pub fn keybindings_default() -> Vec<Keybinding> {
         vec![
             Keybinding {
@@ -2880,6 +2936,9 @@ mod d512_editor_tests {
         }
     }
     fn suggesting_editor() -> (Editor, Arc<AtomicUsize>) {
+        editor_in_mode(D512Mode::Automatic)
+    }
+    fn editor_in_mode(mode: D512Mode) -> (Editor, Arc<AtomicUsize>) {
         let mut strings = StringTableBuilder::new();
         strings.insert("冊");
         strings.insert("測");
@@ -2898,15 +2957,213 @@ mod d512_editor_tests {
         });
         let calls = Arc::new(AtomicUsize::new(0));
         editor
-            .set_sentence_scorer(Some(Box::new(Probe(calls.clone()))), D512Options::default())
+            .set_sentence_scorer(
+                Some(Box::new(Probe(calls.clone()))),
+                D512Options {
+                    mode,
+                    ..D512Options::default()
+                },
+            )
             .unwrap();
         editor.set_d512_context("前文");
         for key in b"hk4" {
             editor.process_keyevent(map_ascii(&QWERTY_MAP, *key));
         }
         let _ = editor.display();
-        assert!(editor.d512_report().unwrap().suggestion.is_some());
+        if mode != D512Mode::Off {
+            assert!(editor.d512_report().unwrap().suggestion.is_some());
+        }
         (editor, calls)
+    }
+    fn history_bytes(editor: &Editor) -> Vec<u8> {
+        let mut bytes = vec![];
+        editor.shared.hist_dict.to_writer(&mut bytes).unwrap();
+        bytes
+    }
+    fn unchanged_on_rejection(editor: &mut Editor, calls: &AtomicUsize) {
+        let before = format!(
+            "{:?}|{:?}|{:?}|{}|{}|{}|{}|{}",
+            editor.shared.com,
+            editor.last_key_behavior(),
+            editor.syllable_buffer(),
+            editor.is_selecting(),
+            editor.shared.nth_conversion,
+            editor.shared.dirty_level,
+            editor.display_commit(),
+            editor.shared.notice_buffer
+        );
+        let history = history_bytes(editor);
+        let strings = editor.shared.string_table.len();
+        let count = calls.load(Ordering::Relaxed);
+        assert!(!editor.accept_d512_suggestion());
+        assert_eq!(
+            format!(
+                "{:?}|{:?}|{:?}|{}|{}|{}|{}|{}",
+                editor.shared.com,
+                editor.last_key_behavior(),
+                editor.syllable_buffer(),
+                editor.is_selecting(),
+                editor.shared.nth_conversion,
+                editor.shared.dirty_level,
+                editor.display_commit(),
+                editor.shared.notice_buffer
+            ),
+            before
+        );
+        assert_eq!(history_bytes(editor), history);
+        assert_eq!(editor.shared.string_table.len(), strings);
+        assert_eq!(calls.load(Ordering::Relaxed), count);
+    }
+    #[test]
+    fn suggestion_mode_matches_off_order_display_commit_and_learning() {
+        let (mut native, _) = editor_in_mode(D512Mode::Off);
+        let (mut suggestion, _) = editor_in_mode(D512Mode::Suggestion);
+        let history = history_bytes(&suggestion);
+        assert_eq!(suggestion.hypotheses(), native.hypotheses());
+        assert_eq!(suggestion.display(), native.display());
+        assert!(suggestion.d512_report().unwrap().suggestion.is_some());
+        assert_eq!(history_bytes(&suggestion), history);
+        suggestion.commit().unwrap();
+        native.commit().unwrap();
+        assert_eq!(suggestion.display_commit(), native.display_commit());
+        assert_eq!(history_bytes(&suggestion), history_bytes(&native));
+    }
+    #[test]
+    fn suggestion_accepts_once_without_commit_rescore_cursor_move_or_early_learning() {
+        let (mut editor, calls) = editor_in_mode(D512Mode::Suggestion);
+        let text = editor.d512_report().unwrap().suggestion.unwrap().text;
+        let cursor = editor.shared.cursor();
+        let history = history_bytes(&editor);
+        let count = calls.load(Ordering::Relaxed);
+        assert!(editor.accept_d512_suggestion());
+        assert!(editor.d512_report().is_none());
+        assert!(!editor.accept_d512_suggestion());
+        assert_eq!(calls.load(Ordering::Relaxed), count);
+        assert_eq!(editor.shared.cursor(), cursor);
+        assert_eq!(editor.display_commit(), "");
+        assert_eq!(history_bytes(&editor), history);
+        assert_eq!(editor.display(), text);
+        editor.commit().unwrap();
+        assert_eq!(editor.display_commit(), text);
+        assert_ne!(history_bytes(&editor), history);
+    }
+    #[test]
+    fn suggestion_rejects_all_stale_edit_paths_without_changes() {
+        for case in 0..4 {
+            let (mut editor, calls) = editor_in_mode(D512Mode::Suggestion);
+            match case {
+                0 => {
+                    for key in b"hk4" {
+                        editor.process_keyevent(map_ascii(&QWERTY_MAP, *key));
+                    }
+                }
+                1 => {
+                    editor.process_keyevent(
+                        KeyboardEvent::builder()
+                            .code(KEY_BACKSPACE)
+                            .ksym(SYM_BACKSPACE)
+                            .build(),
+                    );
+                }
+                2 => {
+                    editor.start_selecting().unwrap();
+                    editor.select(0).unwrap();
+                }
+                _ => {
+                    editor.set_editor_options(|o| o.auto_commit_threshold = 1);
+                    for key in b"hk4" {
+                        editor.process_keyevent(map_ascii(&QWERTY_MAP, *key));
+                    }
+                }
+            }
+            unchanged_on_rejection(&mut editor, &calls);
+        }
+    }
+    #[test]
+    fn suggestion_rejects_same_length_reading_or_committed_origin_changes() {
+        for change_reading in [true, false] {
+            let (mut editor, calls) = editor_in_mode(D512Mode::Suggestion);
+            if change_reading {
+                editor.shared.com.move_cursor_to_beginning();
+                editor.shared.com.replace(Symbol::from(syl![C, E, TONE2]));
+            } else {
+                let symbol = editor.symbols()[0].clone();
+                editor.shared.com.remove_front(1);
+                editor.shared.com.insert(symbol);
+            }
+            unchanged_on_rejection(&mut editor, &calls);
+        }
+    }
+    #[test]
+    fn suggestion_acceptance_preserves_manual_ranges_and_pins_repeated_readings() {
+        let (mut editor, _) = editor_in_mode(D512Mode::Suggestion);
+        for key in b"hk4" {
+            editor.process_keyevent(map_ascii(&QWERTY_MAP, *key));
+        }
+        let first = editor.display().chars().next().unwrap().to_string();
+        let manual = Selection {
+            start: 0,
+            end: 1,
+            wid: editor.shared.string_table.get_wid(&first).unwrap(),
+        };
+        editor.shared.com.select(manual);
+        let _ = editor.display();
+        let text = editor.d512_report().unwrap().suggestion.unwrap().text;
+        assert!(editor.accept_d512_suggestion());
+        let composition: &crate::conversion::Composition = editor.shared.com.as_ref();
+        assert!(
+            composition
+                .selections()
+                .iter()
+                .any(|s| (s.start, s.end, s.wid) == (manual.start, manual.end, manual.wid))
+        );
+        assert_eq!(editor.display(), text);
+        for key in b"hk4" {
+            editor.process_keyevent(map_ascii(&QWERTY_MAP, *key));
+        }
+        assert!(editor.display().starts_with(&text));
+    }
+    #[test]
+    fn suggestion_rejects_off_automatic_empty_pending_syllable_and_selection_window() {
+        for mode in [D512Mode::Off, D512Mode::Automatic] {
+            let (mut editor, calls) = editor_in_mode(mode);
+            unchanged_on_rejection(&mut editor, &calls);
+        }
+        let (mut editor, calls) = editor_in_mode(D512Mode::Suggestion);
+        editor.process_keyevent(map_ascii(&QWERTY_MAP, b'h'));
+        assert!(editor.entering_syllable());
+        unchanged_on_rejection(&mut editor, &calls);
+        editor.cancel_entering_syllable();
+        editor.start_selecting().unwrap();
+        unchanged_on_rejection(&mut editor, &calls);
+        editor.clear();
+        unchanged_on_rejection(&mut editor, &calls);
+    }
+    #[test]
+    fn suggestion_rejects_late_invalid_interval_atomically() {
+        let (mut editor, calls) = editor_in_mode(D512Mode::Suggestion);
+        for key in b"hk4" {
+            editor.process_keyevent(map_ascii(&QWERTY_MAP, *key));
+        }
+        let mut outcomes = editor.hypotheses();
+        outcomes[1].intervals[1].start = 2;
+        outcomes[1].intervals[1].end = 3;
+        editor.shared.d512.lock().unwrap().rerank(
+            editor.shared.com.as_ref(),
+            &editor.shared.string_table,
+            outcomes,
+        );
+        assert!(editor.d512_report().unwrap().suggestion.is_some());
+        unchanged_on_rejection(&mut editor, &calls);
+    }
+    #[test]
+    fn suggestion_acceptance_does_not_block_on_busy_state() {
+        let (mut editor, calls) = editor_in_mode(D512Mode::Suggestion);
+        let state = editor.shared.d512.clone();
+        let guard = state.lock().unwrap();
+        unchanged_on_rejection(&mut editor, &calls);
+        drop(guard);
+        assert!(editor.accept_d512_suggestion());
     }
     fn press_escape(editor: &mut Editor) {
         editor.process_keyevent(KeyboardEvent::builder().code(KEY_ESC).ksym(SYM_ESC).build());

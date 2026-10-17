@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 //! Optional D512 sentence reranking; tensor protocol follows the MIT model card.
 use crate::{
-    conversion::{Composition, Outcome},
+    conversion::{Composition, Outcome, Selection},
     dictionary::StringTable,
 };
 use std::{
@@ -117,6 +117,7 @@ pub struct D512State {
     last: Option<D512Report>,
     report_snapshot: Option<ReportSnapshot>,
     editor_committed_prefix: u64,
+    suggested_path: Option<Vec<Selection>>,
 }
 impl fmt::Debug for D512State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -178,9 +179,21 @@ impl D512State {
         }
         self.report()
     }
+    pub(crate) fn suggestion_for(
+        &self,
+        current: &Composition,
+        committed_prefix: u64,
+    ) -> Option<(D512Suggestion, Vec<Selection>)> {
+        if self.options.mode != D512Mode::Suggestion {
+            return None;
+        }
+        let suggestion = self.report_for(current, committed_prefix)?.suggestion?;
+        Some((suggestion, self.suggested_path.clone()?))
+    }
     pub(crate) fn invalidate(&mut self) {
         self.last = None;
         self.report_snapshot = None;
+        self.suggested_path = None;
     }
     pub(crate) fn rerank(
         &mut self,
@@ -274,8 +287,25 @@ impl D512State {
             report.suggestion = None;
         }
         if report.selected_index != 0 {
-            let winner = outcomes.remove(report.selected_index);
-            outcomes.insert(0, winner);
+            if self.options.mode == D512Mode::Suggestion {
+                self.suggested_path = outcomes[report.selected_index]
+                    .intervals
+                    .iter()
+                    .map(|interval| {
+                        if !interval.is_phrase {
+                            return None;
+                        }
+                        Some(Selection {
+                            start: interval.start,
+                            end: interval.end,
+                            wid: strings.get_wid(&interval.text)?,
+                        })
+                    })
+                    .collect();
+            } else {
+                let winner = outcomes.remove(report.selected_index);
+                outcomes.insert(0, winner);
+            }
         }
         self.report_snapshot = Some(ReportSnapshot {
             composition: com.clone(),
@@ -421,6 +451,17 @@ mod tests {
         let report = s.report().unwrap();
         assert_eq!(report.selected_index, 1);
         assert_eq!(report.suggestion.unwrap().fused_gap, 1.0);
+    }
+
+    #[test]
+    fn suggestion_mode_keeps_every_native_outcome_while_reporting_winner() {
+        let (mut state, calls, com, strings, out) = fixture(Ok(vec![-10., -2.]), Duration::ZERO);
+        state.options.mode = D512Mode::Suggestion;
+        assert_eq!(state.rerank(&com, &strings, out.clone()), out);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let report = state.report().unwrap();
+        assert_eq!(report.selected_index, 1);
+        assert_eq!(report.suggestion.unwrap().outcome_index, 1);
     }
 
     #[test]
