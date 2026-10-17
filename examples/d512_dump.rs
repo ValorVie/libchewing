@@ -113,10 +113,35 @@ fn system_engine(dir: &Path) -> Result<ChewingEngine, Box<dyn Error>> {
     })
 }
 
+#[cfg(feature = "d512-ort")]
+fn dump_options(args: &[String]) -> Result<chewing::d512::D512Options, Box<dyn Error>> {
+    if !matches!(args.len(), 0 | 1 | 3) {
+        return Err("expected [TIMEOUT_MS [WEIGHT MARGIN]]".into());
+    }
+    let mut options = chewing::d512::D512Options::default();
+    if !args.is_empty() {
+        options.timeout = std::time::Duration::from_millis(args[0].parse()?);
+    }
+    if args.len() == 3 {
+        options.weight = args[1].parse()?;
+        options.margin = args[2].parse()?;
+    }
+    if !options.weight.is_finite()
+        || options.weight < 0.
+        || !options.margin.is_finite()
+        || options.margin < 0.
+        || options.timeout.is_zero()
+        || options.timeout > std::time::Duration::from_secs(5)
+    {
+        return Err("invalid fusion options or timeout".into());
+    }
+    Ok(options)
+}
+
 fn run() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() != 2 && !(cfg!(feature = "d512-ort") && (args.len() == 4 || args.len() == 5)) {
-        return Err("Usage: d512_dump SYSTEM_DATA_DIR INPUT_JSONL [MODEL_DIR ABSOLUTE_ORT_LIBRARY [TIMEOUT_MS]] > requests.jsonl".into());
+    if args.len() != 2 && !(cfg!(feature = "d512-ort") && matches!(args.len(), 4 | 5 | 7)) {
+        return Err("Usage: d512_dump SYSTEM_DATA_DIR INPUT_JSONL [MODEL_DIR ABSOLUTE_ORT_LIBRARY [TIMEOUT_MS [WEIGHT MARGIN]]] > requests.jsonl".into());
     }
     let engine = system_engine(Path::new(&args[0]))?;
     #[cfg(feature = "d512-ort")]
@@ -125,6 +150,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let score_time = std::sync::Arc::new(std::sync::Mutex::new(None::<std::time::Duration>));
     #[cfg(feature = "d512-ort")]
     if args.len() >= 4 {
+        let options = dump_options(&args[4..])?;
         let scorer = TimedScorer {
             inner: chewing::d512::OrtSentenceScorer::load(
                 Path::new(&args[2]),
@@ -132,10 +158,6 @@ fn run() -> Result<(), Box<dyn Error>> {
             )?,
             elapsed: score_time.clone(),
         };
-        let mut options = chewing::d512::D512Options::default();
-        if args.len() == 5 {
-            options.timeout = std::time::Duration::from_millis(args[4].parse()?);
-        }
         engine.set_sentence_scorer(Some(Box::new(scorer)), options)?;
         eprintln!(
             "{}",
@@ -259,6 +281,49 @@ fn main() {
 mod tests {
     use super::*;
     use chewing::conversion::Interval;
+
+    #[cfg(feature = "d512-ort")]
+    #[test]
+    fn explicit_fusion_options_override_defaults_and_timeout() {
+        let args = ["5000", "0.15", "0.8"].map(String::from);
+        let options = dump_options(&args).unwrap();
+        assert_eq!(options.weight, 0.15);
+        assert_eq!(options.margin, 0.8);
+        assert_eq!(options.timeout.as_millis(), 5000);
+    }
+    #[cfg(feature = "d512-ort")]
+    #[test]
+    fn rejects_partial_nonfinite_negative_and_invalid_timeout_options() {
+        for args in [
+            vec!["5000", "0.25"],
+            vec!["5000", "0.25", "1", "extra"],
+            vec!["0"],
+            vec!["5001"],
+            vec!["no"],
+            vec!["100", "NaN", "1"],
+            vec!["100", "0.25", "inf"],
+            vec!["100", "-0.25", "1"],
+            vec!["100", "0.25", "-1"],
+        ] {
+            assert!(dump_options(&args.into_iter().map(String::from).collect::<Vec<_>>()).is_err());
+        }
+    }
+    #[cfg(feature = "d512-ort")]
+    #[test]
+    fn omitted_fusion_options_keep_current_library_defaults() {
+        let options = dump_options(&[]).unwrap();
+        let default = chewing::d512::D512Options::default();
+        assert_eq!(
+            (options.weight, options.margin, options.timeout),
+            (default.weight, default.margin, default.timeout)
+        );
+        let options = dump_options(&["5000".into()]).unwrap();
+        assert_eq!(
+            (options.weight, options.margin),
+            (default.weight, default.margin)
+        );
+        assert_eq!(options.timeout.as_millis(), 5000);
+    }
 
     #[test]
     fn parses_tones_without_changing_readings() {
