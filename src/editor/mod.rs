@@ -78,6 +78,8 @@ pub struct EditorOptions {
     pub esc_clear_all_buffer: bool,
     pub space_is_select_key: bool,
     pub auto_shift_cursor: bool,
+    /// Wrap left/right movement at composition edges. Default: true (upstream).
+    pub cursor_wrap: bool,
     pub phrase_choice_rearward: bool,
     pub disable_auto_learn_phrase: bool,
     pub auto_learn_new_words: bool,
@@ -100,6 +102,7 @@ impl Default for EditorOptions {
             esc_clear_all_buffer: false,
             space_is_select_key: false,
             auto_shift_cursor: false,
+            cursor_wrap: true,
             phrase_choice_rearward: false,
             disable_auto_learn_phrase: false,
             auto_learn_new_words: false,
@@ -1333,14 +1336,14 @@ impl State for Entering {
                     if shared.com.is_empty() {
                         return self.spin_ignore();
                     }
-                    shared.com.move_cursor_left(1);
+                    shared.com.move_cursor_left(1, shared.options.cursor_wrap);
                     self.spin_absorb()
                 }
                 Action::MoveCursorRight => {
                     if shared.com.is_empty() {
                         return self.spin_ignore();
                     }
-                    shared.com.move_cursor_right(1);
+                    shared.com.move_cursor_right(1, shared.options.cursor_wrap);
                     self.spin_absorb()
                 }
                 Action::Ignore => self.spin_ignore(),
@@ -1792,9 +1795,11 @@ impl Selecting {
                         editor.com.pop_cursor();
                         if editor.options.auto_shift_cursor {
                             if editor.options.phrase_choice_rearward {
-                                editor.com.move_cursor_right(1);
+                                editor.com.move_cursor_right(1, editor.options.cursor_wrap);
                             } else {
-                                editor.com.move_cursor_right(len);
+                                editor
+                                    .com
+                                    .move_cursor_right(len, editor.options.cursor_wrap);
                             }
                         }
                         self.start_entering()
@@ -2145,6 +2150,99 @@ mod tests {
         .ksym(keysym::SYM_CAPSLOCK)
         .caps_lock_if(true)
         .build();
+
+    fn habits_editor() -> super::Editor {
+        let mut strings = StringTableBuilder::new();
+        strings.insert("冊");
+        strings.insert("測");
+        let strings = strings.build();
+        let mut dict = StaticDictBuilder::new();
+        for word in ["冊", "測"] {
+            dict.insert(
+                &[syl![bpmf::C, bpmf::E, bpmf::TONE4]],
+                strings.get_wid(word).unwrap(),
+            );
+        }
+        EditorBuilder::new()
+            .string_table(strings)
+            .static_dict(dict.build())
+            .build()
+    }
+    fn habits_type_word(editor: &mut super::Editor) {
+        for key in b"hk4" {
+            editor.process_keyevent(map_ascii(&QWERTY_MAP, *key));
+        }
+        assert_eq!(editor.len(), 1);
+    }
+    fn habits_press(
+        editor: &mut super::Editor,
+        code: keycode::Keycode,
+        ksym: keysym::Keysym,
+    ) -> EditorKeyBehavior {
+        editor.process_keyevent(KeyboardEvent::builder().code(code).ksym(ksym).build())
+    }
+
+    #[test]
+    fn habits_cursor_wrap_disabled_stops_at_both_edges() {
+        let mut editor = habits_editor();
+        editor.set_editor_options(|o| o.cursor_wrap = false);
+        habits_type_word(&mut editor);
+        assert_eq!(
+            habits_press(&mut editor, keycode::KEY_RIGHT, keysym::SYM_RIGHT),
+            EditorKeyBehavior::Absorb
+        );
+        assert_eq!(editor.cursor(), 1);
+        habits_press(&mut editor, keycode::KEY_HOME, keysym::SYM_HOME);
+        assert_eq!(
+            habits_press(&mut editor, keycode::KEY_LEFT, keysym::SYM_LEFT),
+            EditorKeyBehavior::Absorb
+        );
+        assert_eq!(editor.cursor(), 0);
+    }
+    #[test]
+    fn habits_cursor_wrap_default_and_enabled_preserve_cycling() {
+        let mut editor = habits_editor();
+        habits_type_word(&mut editor);
+        habits_press(&mut editor, keycode::KEY_RIGHT, keysym::SYM_RIGHT);
+        assert_eq!(editor.cursor(), 0);
+        habits_press(&mut editor, keycode::KEY_LEFT, keysym::SYM_LEFT);
+        assert_eq!(editor.cursor(), 1);
+        editor.set_editor_options(|o| o.cursor_wrap = true);
+        habits_press(&mut editor, keycode::KEY_RIGHT, keysym::SYM_RIGHT);
+        assert_eq!(editor.cursor(), 0);
+        habits_press(&mut editor, keycode::KEY_LEFT, keysym::SYM_LEFT);
+        assert_eq!(editor.cursor(), 1);
+    }
+    #[test]
+    fn habits_cursor_wrap_auto_shift_selection_obeys_option() {
+        for wrap in [false, true] {
+            for rearward in [false, true] {
+                let mut editor = habits_editor();
+                editor.set_editor_options(|o| {
+                    o.cursor_wrap = wrap;
+                    o.phrase_choice_rearward = rearward;
+                    o.auto_shift_cursor = true;
+                });
+                habits_type_word(&mut editor);
+                assert_eq!(editor.cursor(), 1);
+                editor.start_selecting().unwrap();
+                let chosen = editor
+                    .all_candidates()
+                    .unwrap()
+                    .iter()
+                    .position(|s| s == "測")
+                    .unwrap();
+                editor.select(chosen).unwrap();
+                assert_eq!(editor.display(), "測");
+                assert_eq!(
+                    editor.cursor(),
+                    if wrap { 0 } else { 1 },
+                    "wrap={wrap}, rearward={rearward}"
+                );
+                assert_eq!(editor.display_commit(), "");
+            }
+        }
+    }
 
     #[test]
     fn editing_mode_input_bopomofo() {
