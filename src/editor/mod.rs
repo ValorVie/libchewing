@@ -75,6 +75,9 @@ pub enum ConversionEngineKind {
 #[derive(Debug, Clone, Copy)]
 pub struct EditorOptions {
     pub easy_symbol_input: bool,
+    /// Enable six pure Ctrl punctuation shortcuts in preedit. Default: false.
+    /// An unfinished syllable consumes the shortcut with Bell and stays unchanged.
+    pub ctrl_symbol_new_phonetic: bool,
     pub esc_clear_all_buffer: bool,
     pub space_is_select_key: bool,
     pub auto_shift_cursor: bool,
@@ -99,6 +102,7 @@ impl Default for EditorOptions {
     fn default() -> Self {
         Self {
             easy_symbol_input: false,
+            ctrl_symbol_new_phonetic: false,
             esc_clear_all_buffer: false,
             space_is_select_key: false,
             auto_shift_cursor: false,
@@ -117,6 +121,32 @@ impl Default for EditorOptions {
             sort_candidates_by_frequency: false,
             auto_snapshot_selections: false,
         }
+    }
+}
+
+impl EditorOptions {
+    fn ctrl_symbol(&self, ev: KeyboardEvent) -> Option<char> {
+        if !self.ctrl_symbol_new_phonetic
+            || !ev.is_state_on(KeyState::Control)
+            || ev.is_state_on(KeyState::Shift)
+            || ev.is_state_on(KeyState::Alt)
+            || ev.is_state_on(KeyState::Super)
+            || !ev.ksym.is_unicode()
+        {
+            return None;
+        }
+        const SYMBOLS: [(char, char); 6] = [
+            (',', '，'),
+            ('.', '。'),
+            (';', '；'),
+            ('\'', '、'),
+            ('[', '【'),
+            (']', '】'),
+        ];
+        SYMBOLS
+            .iter()
+            .find(|(key, _)| *key == ev.ksym.to_unicode())
+            .map(|(_, symbol)| *symbol)
     }
 }
 
@@ -1274,6 +1304,11 @@ struct Highlighting {
 }
 
 impl Entering {
+    fn input_symbol(&self, shared: &mut SharedState, symbol: char) -> Transition {
+        shared.com.insert(Symbol::from(symbol));
+        shared.snapshot(false, 0);
+        self.spin_absorb()
+    }
     fn start_selecting(&self, editor: &mut SharedState) -> Transition {
         match editor.com.symbol_for_select() {
             Some(symbol) => {
@@ -1486,6 +1521,13 @@ impl State for Entering {
                 if shared.nth_conversion != 0 {
                     shared.snapshot(true, 0);
                 }
+                if let Some(symbol) = shared.options.ctrl_symbol(ev) {
+                    return if shared.com.is_empty() {
+                        self.spin_ignore()
+                    } else {
+                        self.input_symbol(shared, symbol)
+                    };
+                }
                 match shared.options.language_mode {
                     LanguageMode::Chinese if ev.ksym == SYM_GRAVE && !ev.has_modifiers() => {
                         self.start_symbol_input(shared)
@@ -1531,9 +1573,7 @@ impl State for Entering {
                             return self.start_enter_syllable();
                         }
                         if let Some(symbol) = special_symbol_input(ev.ksym.to_unicode()) {
-                            shared.com.insert(Symbol::from(symbol));
-                            shared.snapshot(false, 0);
-                            return self.spin_absorb();
+                            return self.input_symbol(shared, symbol);
                         }
                         if ev.ksym.is_unicode() {
                             match shared.options.character_form {
@@ -1624,6 +1664,9 @@ impl EnteringSyllable {
 
 impl State for EnteringSyllable {
     fn next(&mut self, shared: &mut SharedState, ev: KeyboardEvent) -> Transition {
+        if shared.options.ctrl_symbol(ev).is_some() {
+            return self.spin_bell();
+        }
         match ev.ksym {
             SYM_BACKSPACE => {
                 shared.syl.remove_last();
@@ -2180,6 +2223,229 @@ mod tests {
         ksym: keysym::Keysym,
     ) -> EditorKeyBehavior {
         editor.process_keyevent(KeyboardEvent::builder().code(code).ksym(ksym).build())
+    }
+
+    const HABITS_CTRL_SYMBOLS: [(u8, char); 6] = [
+        (b',', '，'),
+        (b'.', '。'),
+        (b';', '；'),
+        (b'\'', '、'),
+        (b'[', '【'),
+        (b']', '】'),
+    ];
+
+    fn habits_ctrl_event(raw: u8) -> KeyboardEvent {
+        let mut event = map_ascii(&QWERTY_MAP, raw);
+        event.state |= crate::input::KeyState::Control as u32;
+        event
+    }
+
+    #[test]
+    fn habits_ctrl_symbols_insert_fixed_fullwidth_without_commit() {
+        for (raw, symbol) in HABITS_CTRL_SYMBOLS {
+            for form in [
+                super::CharacterForm::Halfwidth,
+                super::CharacterForm::Fullwidth,
+            ] {
+                for at_start in [false, true] {
+                    let mut editor = habits_editor();
+                    editor.set_editor_options(|o| {
+                        o.ctrl_symbol_new_phonetic = true;
+                        o.character_form = form;
+                    });
+                    habits_type_word(&mut editor);
+                    if at_start {
+                        habits_press(&mut editor, keycode::KEY_HOME, keysym::SYM_HOME);
+                    }
+                    assert_eq!(
+                        editor.process_keyevent(habits_ctrl_event(raw)),
+                        EditorKeyBehavior::Absorb,
+                        "{raw}, {form:?}, {at_start}"
+                    );
+                    let display = editor.display();
+                    assert_eq!(display.chars().count(), 2);
+                    assert_eq!(
+                        if at_start {
+                            display.chars().next()
+                        } else {
+                            display.chars().last()
+                        },
+                        Some(symbol)
+                    );
+                    assert_eq!(editor.cursor(), if at_start { 1 } else { 2 });
+                    assert_eq!(editor.len(), 2);
+                    assert_eq!(editor.display_commit(), "");
+                    assert!(!editor.entering_syllable());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn habits_ctrl_symbols_empty_preedit_ignores_shortcut() {
+        for (raw, _) in HABITS_CTRL_SYMBOLS {
+            let mut editor = habits_editor();
+            editor.set_editor_options(|o| o.ctrl_symbol_new_phonetic = true);
+            assert_eq!(
+                editor.process_keyevent(habits_ctrl_event(raw)),
+                EditorKeyBehavior::Ignore,
+                "{raw}"
+            );
+            assert!(editor.is_empty());
+            assert!(!editor.entering_syllable());
+            assert_eq!(editor.display_commit(), "");
+        }
+    }
+
+    #[test]
+    fn habits_ctrl_symbols_lock_states_are_not_chord_modifiers() {
+        let mut editor = habits_editor();
+        editor.set_editor_options(|o| o.ctrl_symbol_new_phonetic = true);
+        habits_type_word(&mut editor);
+        let mut event = habits_ctrl_event(b'[');
+        event.state |=
+            crate::input::KeyState::CapsLock as u32 | crate::input::KeyState::NumLock as u32;
+        assert_eq!(editor.process_keyevent(event), EditorKeyBehavior::Absorb);
+        assert!(editor.display().ends_with('【'));
+        assert_eq!(editor.display_commit(), "");
+    }
+
+    #[test]
+    fn habits_ctrl_symbols_pending_syllable_bells_without_changes() {
+        for (raw, _) in HABITS_CTRL_SYMBOLS {
+            for with_word in [false, true] {
+                let mut editor = habits_editor();
+                editor.set_editor_options(|o| o.ctrl_symbol_new_phonetic = true);
+                if with_word {
+                    habits_type_word(&mut editor);
+                }
+                for key in b"hk" {
+                    editor.process_keyevent(map_ascii(&QWERTY_MAP, *key));
+                }
+                let syllable = editor.syllable_buffer();
+                let keys = editor.syllable_buffer_display();
+                let symbols = editor.symbols().to_vec();
+                let display = editor.display();
+                let cursor = editor.cursor();
+                assert_eq!(
+                    editor.process_keyevent(habits_ctrl_event(raw)),
+                    EditorKeyBehavior::Bell,
+                    "{raw}, with_word={with_word}"
+                );
+                assert!(editor.entering_syllable());
+                assert_eq!(editor.syllable_buffer(), syllable);
+                assert_eq!(editor.syllable_buffer_display(), keys);
+                assert_eq!(editor.symbols(), symbols);
+                assert_eq!(editor.display(), display);
+                assert_eq!(editor.cursor(), cursor);
+                assert_eq!(editor.display_commit(), "");
+            }
+        }
+    }
+
+    #[test]
+    fn habits_ctrl_symbols_selecting_keeps_candidates_and_preedit() {
+        for (raw, _) in HABITS_CTRL_SYMBOLS {
+            let mut editor = habits_editor();
+            editor.set_editor_options(|o| o.ctrl_symbol_new_phonetic = true);
+            habits_type_word(&mut editor);
+            editor.start_selecting().unwrap();
+            let candidates = editor.all_candidates().unwrap();
+            let display = editor.display();
+            let cursor = editor.cursor();
+            assert_eq!(
+                editor.process_keyevent(habits_ctrl_event(raw)),
+                EditorKeyBehavior::Bell
+            );
+            assert!(editor.is_selecting());
+            assert_eq!(editor.all_candidates().unwrap(), candidates);
+            assert_eq!(editor.display(), display);
+            assert_eq!(editor.cursor(), cursor);
+            assert_eq!(editor.display_commit(), "");
+        }
+    }
+
+    #[test]
+    fn habits_ctrl_symbols_default_and_disabled_preserve_upstream() {
+        assert!(!super::EditorOptions::default().ctrl_symbol_new_phonetic);
+        for explicit_disable in [false, true] {
+            for ((raw, _), upstream) in HABITS_CTRL_SYMBOLS
+                .into_iter()
+                .zip(['，', '。', '；', '、', '「', '」'])
+            {
+                let mut editor = habits_editor();
+                if explicit_disable {
+                    editor.set_editor_options(|o| o.ctrl_symbol_new_phonetic = false);
+                }
+                habits_type_word(&mut editor);
+                assert_eq!(
+                    editor.process_keyevent(habits_ctrl_event(raw)),
+                    EditorKeyBehavior::Absorb
+                );
+                assert!(editor.display().ends_with(upstream));
+                assert_eq!(editor.len(), 2);
+                assert_eq!(editor.display_commit(), "");
+            }
+        }
+    }
+
+    #[test]
+    fn habits_ctrl_symbols_other_modifiers_and_shortcuts_unchanged() {
+        use crate::input::KeyState;
+
+        let mut events = (*b"/012").map(habits_ctrl_event).to_vec();
+        for (raw, _) in HABITS_CTRL_SYMBOLS {
+            events.push(map_ascii(&QWERTY_MAP, raw));
+            for modifier in [KeyState::Shift, KeyState::Alt, KeyState::Super] {
+                let mut event = habits_ctrl_event(raw);
+                event.state |= modifier as u32;
+                events.push(event);
+            }
+        }
+        // Actual Shift-translated keysyms, including the easy-symbol abbreviation path.
+        events.extend(b"<>:\"{}A".iter().copied().map(habits_ctrl_event));
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "A ※\n").unwrap();
+        for event in events {
+            for context in 0..3 {
+                let mut off = habits_editor();
+                let mut on = habits_editor();
+                on.set_editor_options(|o| o.ctrl_symbol_new_phonetic = true);
+                for editor in [&mut off, &mut on] {
+                    editor.set_editor_options(|o| o.easy_symbol_input = true);
+                    editor.shared.abbr = super::AbbrevTable::open(file.path()).unwrap();
+                    if context > 0 {
+                        habits_type_word(editor);
+                    }
+                    if context == 2 {
+                        editor.process_keyevent(map_ascii(&QWERTY_MAP, b'h'));
+                    }
+                }
+                assert_eq!(
+                    off.process_keyevent(event),
+                    on.process_keyevent(event),
+                    "{event}, {context}"
+                );
+                assert_eq!(off.symbols(), on.symbols(), "{event}, {context}");
+                assert_eq!(
+                    off.syllable_buffer(),
+                    on.syllable_buffer(),
+                    "{event}, {context}"
+                );
+                assert_eq!(off.cursor(), on.cursor(), "{event}, {context}");
+                assert_eq!(off.display(), on.display(), "{event}, {context}");
+                assert_eq!(
+                    off.display_commit(),
+                    on.display_commit(),
+                    "{event}, {context}"
+                );
+                assert_eq!(off.is_entering(), on.is_entering(), "{event}, {context}");
+                assert_eq!(off.is_selecting(), on.is_selecting(), "{event}, {context}");
+                if event.ksym == keysym::Keysym::from('A') && context == 1 {
+                    assert!(on.display().ends_with('※'));
+                }
+            }
+        }
     }
 
     #[test]
