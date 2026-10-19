@@ -60,9 +60,10 @@ win overlapping positions; ties prefer the earlier position. A single character
 cannot split an existing multi-character word. Explicit live selections and
 surviving manual deletion fragments are protected. Only valid dictionary entries
 for the exact complete reading are eligible. Preferences constrain a temporary
-composition copy, retain the original dictionary cost (including rare-reading
-penalties), and never become manual learning events. Turning the switch off
-withdraws them without committing or deleting text, history, or manual choices.
+composition copy, retain the original language-model, history, and user-dictionary
+costs, and never become manual learning events. This fork disables rare-reading
+penalties while keeping those readings available as candidates. Turning the switch
+off withdraws them without committing or deleting text, history, or manual choices.
 
 After choosing and confirming `重` for `ㄔㄨㄥˊ`, the next preedit is `重`.
 The candidate window retains its original single-character order, including

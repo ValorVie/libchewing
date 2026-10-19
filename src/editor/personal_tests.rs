@@ -109,12 +109,12 @@ fn words(e: &mut Editor) -> Vec<String> {
 fn personal_rare_reading_recent_choice_changes_preedit_preserves_single_window() {
     let mut e = fixture();
     type_keys(&mut e, b"tj/6");
-    assert_eq!(e.display(), "蟲");
+    let original_window = words(&mut e);
     e.clear();
     commit_choice(&mut e, b"tj/6", "重");
     type_keys(&mut e, b"tj/6");
     assert_eq!(e.display(), "重");
-    assert_eq!(words(&mut e)[0], "蟲");
+    assert_eq!(words(&mut e), original_window);
 }
 #[test]
 fn personal_mac_001_only_confirmed_manual_commits_learn_once() {
@@ -387,7 +387,7 @@ mod d512_personal {
 
 #[cfg(feature = "d512")]
 #[test]
-fn personal_temporary_pin_keeps_rare_penalty_in_raw_score() {
+fn personal_temporary_pin_has_no_rare_reading_cost() {
     let mut e = fixture();
     let original = e.shared.conv.convert_native(&{
         let mut c = crate::conversion::Composition::new();
@@ -405,9 +405,21 @@ fn personal_temporary_pin_keeps_rare_penalty_in_raw_score() {
         })
         .unwrap()
         .cost;
+    let normal_cost = original
+        .iter()
+        .find(|o| {
+            o.intervals
+                .iter()
+                .map(|i| i.text.as_ref())
+                .collect::<String>()
+                == "蟲"
+        })
+        .unwrap()
+        .cost;
+    assert_eq!(rare_cost, normal_cost);
     commit_choice(&mut e, b"tj/6", "重");
     type_keys(&mut e, b"tj/6");
-    assert_eq!(e.hypotheses()[0].cost, rare_cost);
+    assert_eq!(e.hypotheses()[0].cost, normal_cost);
 }
 
 #[test]
@@ -598,7 +610,7 @@ fn personal_d512_newly_confirmed_history_invalidates_old_calibration() {
 #[cfg(feature = "d512")]
 #[test]
 fn personal_d512_acceptance_learns_only_changed_suggestion_words() {
-    struct Prefer;
+    struct Prefer(String);
     impl crate::d512::SentenceScorer for Prefer {
         fn score(
             &mut self,
@@ -607,25 +619,29 @@ fn personal_d512_acceptance_learns_only_changed_suggestion_words() {
         ) -> Result<Vec<f64>, crate::d512::D512Error> {
             Ok(r.candidates
                 .iter()
-                .map(|s| if s == "蟲世" { 0. } else { -1000. })
+                .map(|s| if s == &self.0 { 0. } else { -1000. })
                 .collect())
         }
     }
     let mut e = fixture();
+    type_keys(&mut e, b"tj/6g4");
+    let original = e.display();
+    assert!(original.ends_with("試"));
+    let prefix = original.chars().next().unwrap().to_string();
+    let target = format!("{prefix}世");
     e.set_sentence_scorer(
-        Some(Box::new(Prefer)),
+        Some(Box::new(Prefer(target.clone()))),
         crate::d512::D512Options {
             mode: crate::d512::D512Mode::Suggestion,
             ..Default::default()
         },
     )
     .unwrap();
-    type_keys(&mut e, b"tj/6g4");
-    assert_eq!(e.display(), "蟲試");
+    assert_eq!(e.display(), original);
     assert!(e.accept_d512_suggestion());
-    assert_eq!(e.display(), "蟲世");
+    assert_eq!(e.display(), target);
     e.commit().unwrap();
     confirm(&mut e, true);
     assert_eq!(count(&e, &[syl![SH, TONE4]], "世"), 1);
-    assert_eq!(count(&e, &[syl![CH, U, ENG, TONE2]], "蟲"), 0);
+    assert_eq!(count(&e, &[syl![CH, U, ENG, TONE2]], &prefix), 0);
 }

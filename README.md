@@ -10,6 +10,8 @@
 
 # libchewing - The intelligent phonetic input method library
 
+本 fork 停用罕用讀音扣分；保留 `rare_dict.bin` 的載入與候選讀音。
+
 The Chewing (酷音) is an intelligent phonetic input method (Zhuyin/Bopomofo)
 and is one of the most popular choices for Traditional Chinese users. Chewing
 was inspired by other proprietary intelligent Zhuyin input methods on Microsoft
