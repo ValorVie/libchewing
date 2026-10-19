@@ -8,7 +8,7 @@ use std::{
     hash::{BuildHasher, Hasher, RandomState},
     io::{self, Write},
     path::PathBuf,
-    sync::{Arc, Mutex, OnceLock, mpsc},
+    sync::{Arc, Mutex, OnceLock, Weak, mpsc},
     thread::{self, JoinHandle},
 };
 
@@ -49,6 +49,10 @@ type Event = (Vec<String>, String, u64);
 pub(crate) struct CandidateRankingStore {
     shared: Arc<Shared>,
 }
+#[derive(Debug)]
+pub(crate) struct WeakCandidateRankingStore {
+    shared: Weak<Shared>,
+}
 #[derive(Default)]
 struct Shared {
     state: Arc<Mutex<State>>,
@@ -84,6 +88,11 @@ impl CandidateRankingStore {
                 path,
                 ..Default::default()
             }),
+        }
+    }
+    pub(crate) fn downgrade(&self) -> WeakCandidateRankingStore {
+        WeakCandidateRankingStore {
+            shared: Arc::downgrade(&self.shared),
         }
     }
     /// Activation only spawns the worker. Loading never runs on the caller.
@@ -261,6 +270,14 @@ impl CandidateRankingStore {
                 let _ = wait.recv();
             }
         }
+    }
+}
+
+impl WeakCandidateRankingStore {
+    pub(crate) fn upgrade(&self) -> Option<CandidateRankingStore> {
+        self.shared
+            .upgrade()
+            .map(|shared| CandidateRankingStore { shared })
     }
 }
 

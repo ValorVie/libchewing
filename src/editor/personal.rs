@@ -4,7 +4,7 @@ use crate::{
     conversion::{Composition, Gap, Outcome, Selection, Symbol},
     dictionary::{CompositeDict, LookupStrategy, StringTable},
     model::Candidate,
-    user::candidate_ranking::CandidateRankingStore,
+    user::candidate_ranking::{CandidateRankingStore, WeakCandidateRankingStore},
     zhuyin::SyllableVec,
 };
 use std::{
@@ -140,22 +140,26 @@ impl fmt::Debug for Receipt {
 /// Owned confirmation for an exact commit buffer. Keep it through the edit-session
 /// callback; call `confirm(true)` only when that text was inserted unchanged.
 /// Dropping a receipt rejects it. Debug never exposes readings or text.
+/// Confirmation after the editor's store has been dropped is ignored.
 #[derive(Debug)]
 pub struct PersonalCandidateCommit {
     receipt: Option<Receipt>,
-    store: CandidateRankingStore,
+    store: WeakCandidateRankingStore,
 }
 impl PersonalCandidateCommit {
-    pub(crate) fn new(receipt: Receipt, store: CandidateRankingStore) -> Option<Self> {
+    pub(crate) fn new(receipt: Receipt, store: WeakCandidateRankingStore) -> Option<Self> {
         (!receipt.0.is_empty()).then_some(Self {
             receipt: Some(receipt),
             store,
         })
     }
     pub fn confirm(mut self, inserted_unchanged: bool) {
+        let Some(store) = self.store.upgrade() else {
+            return;
+        };
         if let Some(receipt) = self.receipt.take() {
-            receipt.confirm(inserted_unchanged, &self.store);
-            self.store.save();
+            receipt.confirm(inserted_unchanged, &store);
+            store.save();
         }
     }
 }

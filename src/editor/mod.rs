@@ -592,14 +592,15 @@ impl Editor {
     }
     /// Detach an owned receipt before processing another key or clearing output.
     /// It survives normal editor clear/commit, but switching the preference off
-    /// revokes its learning epoch. Confirm it on the editor's thread.
+    /// revokes its learning epoch. Confirmation after editor teardown is ignored.
+    /// Confirm it on the editor's thread.
     pub fn take_personal_candidate_commit(&mut self) -> Option<PersonalCandidateCommit> {
         let receipt = std::mem::take(&mut self.shared.personal_receipt);
         if self.shared.commit_buffer.is_empty() {
             receipt.cancel();
             return None;
         }
-        PersonalCandidateCommit::new(receipt, self.shared.ranking.clone())
+        PersonalCandidateCommit::new(receipt, self.shared.ranking.downgrade())
     }
     pub fn clear_composition_editor(&mut self) {
         self.shared.clear_composition();

@@ -43,6 +43,11 @@ in reverse order within an editor. Clearing an uncommitted tail cancels it.
 The current automatic overflow path emits complete intervals, so it preserves
 a selected word whose suffix has no standalone dictionary entry.
 
+Confirm before editor teardown if the selection should be learned. A receipt
+does not keep the store alive: once its lifecycle owner is gone, late confirmation
+is discarded without learning or waiting for worker I/O. Already confirmed events
+are flushed during teardown.
+
 ## Candidate order and reversible preedit
 
 Within each complete reading group, latest comes first, then descending counts;

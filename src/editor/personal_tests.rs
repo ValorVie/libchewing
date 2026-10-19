@@ -810,3 +810,101 @@ fn personal_fix1_disabling_keeps_confirmed_pending_writes() {
     assert_eq!(json["groups"][0]["counts"]["世事"], 1);
     assert!(json["groups"][0]["counts"].get("逝世").is_none());
 }
+
+fn personal_receipt_after_editor_drop(confirming: bool) {
+    use crate::user::candidate_ranking::{
+        FILE_NAME,
+        test_io::{IoProbe, observe},
+    };
+    use std::{
+        sync::{Arc, atomic::Ordering, mpsc},
+        thread,
+        time::Duration,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().to_owned();
+    let probe = Arc::new(IoProbe::default());
+    let ui_probe = probe.clone();
+    let (ready, wait_ready) = mpsc::channel();
+    let (start, wait_start) = mpsc::channel();
+    let (done, wait_done) = mpsc::channel();
+    let ui = thread::spawn(move || {
+        let _observe = observe(ui_probe);
+        let mut e = personal_editor_at(dir);
+        e.set_editor_options(|o| {
+            o.personal_candidate_preference = true;
+            o.phrase_choice_rearward = true;
+            o.disable_auto_learn_phrase = true;
+        });
+        commit_choice(&mut e, b"g4g4", "世事");
+        e.clear();
+        type_keys(&mut e, b"g4g4");
+        choose(&mut e, "逝世");
+        e.commit().unwrap();
+        let receipt = e.take_personal_candidate_commit().unwrap();
+        e.ack();
+        drop(e);
+        ready.send(()).unwrap();
+        wait_start.recv().unwrap();
+        if confirming {
+            receipt.confirm(true);
+        } else {
+            drop(receipt);
+        }
+        done.send(()).unwrap();
+    });
+    wait_ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    let path = root.path().join(FILE_NAME);
+    let saved = fs::read(&path).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(json["groups"][0]["counts"]["世事"], 1);
+    assert!(json["groups"][0]["counts"].get("逝世").is_none());
+    let opens = probe.opens.load(Ordering::SeqCst);
+    let (entered, release) = probe.block_next_open();
+    start.send(()).unwrap();
+    let quick = wait_done.recv_timeout(Duration::from_millis(200)).is_ok();
+    // Always release the gate before joining, including on the failing source.
+    release.send(()).unwrap();
+    if !quick {
+        wait_done.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+    ui.join().unwrap();
+    assert!(quick, "late receipt waited for worker shutdown I/O");
+    assert!(entered.try_recv().is_err(), "late receipt started file I/O");
+    assert_eq!(probe.opens.load(Ordering::SeqCst), opens);
+    assert_eq!(fs::read(path).unwrap(), saved);
+}
+
+#[test]
+fn personal_fix2_late_confirmation_is_discarded_without_waiting_for_io() {
+    personal_receipt_after_editor_drop(true);
+}
+
+#[test]
+fn personal_fix2_late_receipt_drop_does_not_start_io() {
+    personal_receipt_after_editor_drop(false);
+}
+
+#[test]
+fn personal_fix2_owned_receipt_learns_while_editor_is_alive() {
+    use crate::user::candidate_ranking::FILE_NAME;
+    let root = tempfile::tempdir().unwrap();
+    let mut e = personal_editor_at(root.path().to_owned());
+    e.set_editor_options(|o| {
+        o.personal_candidate_preference = true;
+        o.phrase_choice_rearward = true;
+        o.disable_auto_learn_phrase = true;
+    });
+    type_keys(&mut e, b"g4g4");
+    choose(&mut e, "世事");
+    e.commit().unwrap();
+    let receipt = e.take_personal_candidate_commit().unwrap();
+    e.ack();
+    assert_eq!(count(&e, &[syl![SH, TONE4]; 2], "世事"), 0);
+    receipt.confirm(true);
+    assert_eq!(count(&e, &[syl![SH, TONE4]; 2], "世事"), 1);
+    drop(e);
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.path().join(FILE_NAME)).unwrap()).unwrap();
+    assert_eq!(json["groups"][0]["counts"]["世事"], 1);
+}
