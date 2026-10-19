@@ -86,21 +86,44 @@ failures make the entire file read-only for that store's lifetime. In-memory
 learning continues; saving never replaces the unreadable file. Logs and Debug
 output for the new store/receipts do not contain readings, words, or file data.
 
-Confirmation saves pending events. `Editor::flush()` retries pending saves;
-call it during normal lifecycle cleanup. No changes means no file write.
-Writers use a stable `candidate-ranking.json.lock` sidecar with nonblocking
-`File::try_lock`, reread and merge pending increments, then write a unique
-same-directory temporary file, sync it, and rename it over the snapshot.
-Contention retains pending events for a later flush; other I/O failures retain
-the old snapshot. New files use mode 0600 on Unix. A new composition refreshes
-changes from other writers. Across independent processes, latest follows the
-serialized save order; selection-order sequence numbers are local to an editor.
+The store retains only its path until personal preference is first enabled.
+An editor that never enables it neither reads nor writes preference files.
+First enable starts one background worker for that store. Initial loading is
+asynchronous; choices confirmed during loading remain visible and are merged
+with the loaded counts. Turning the switch off prevents new learning and keeps
+already confirmed pending events eligible for persistence.
 
-Persistence is synchronous, following the existing editor flush model. The
-file lock does not wait, but filesystem operations can still take time. This
-is not a claim of bounded disk latency or power-loss durability: the containing
-directory is not separately synced. See the Rust contracts for
-[locking](https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock) and
+Confirmation updates memory and queues persistence. Refresh requests also go to
+the worker. Receipts stay on the editor's thread. The worker takes owned confirmed
+increments from the pending queue and receives commands through the channel.
+It coalesces requests and owns disk state. Reads,
+JSON parsing and serialization, locking, writes, sync and rename all happen
+outside the UI state mutex. The mutex protects only in-memory deltas and the
+snapshot pointer; candidate sorting and whole-snapshot comparison run outside
+it. A save publishes its snapshot and retires only that batch's increments, so
+choices confirmed during an in-flight write remain visible exactly once.
+
+`Editor::flush()` is a lifecycle barrier that waits for queued preference work;
+Editor drop also waits. Neither the key path nor receipt confirmation calls
+this barrier. The last store owner requests final persistence and joins the
+worker. Flush and shutdown may wait for another writer's file lock. Normal
+background saves use a stable `candidate-ranking.json.lock` sidecar with
+nonblocking `File::try_lock`; contention retains events for a later save or
+flush. Writers reread and merge under the file lock, write a unique
+same-directory temporary file, sync it, and rename it over the snapshot.
+I/O failure retains the old file and pending increments; an unreadable snapshot
+remains read-only for the store's lifetime. New files use mode 0600 on Unix.
+No changes means no file write. New composition requests refresh; visibility
+of another writer's changes is asynchronous. Across independent processes,
+latest follows serialized save order; selection-order sequence numbers are
+local to an editor.
+
+The caller never waits for preference I/O during keys or confirmation. This
+is not a hard scheduling-latency or power-loss durability guarantee: lifecycle
+flush can wait on storage and the containing directory is not separately synced.
+See the Rust contracts for
+[channels](https://doc.rust-lang.org/std/sync/mpsc/index.html),
+[locking](https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock),
 [rename](https://doc.rust-lang.org/std/fs/fn.rename.html), and SQLite's discussion
 of [atomic commit and filesystem assumptions](https://www.sqlite.org/atomiccommit.html).
 

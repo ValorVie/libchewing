@@ -645,3 +645,168 @@ fn personal_d512_acceptance_learns_only_changed_suggestion_words() {
     assert_eq!(count(&e, &[syl![SH, TONE4]], "世"), 1);
     assert_eq!(count(&e, &[syl![CH, U, ENG, TONE2]], &prefix), 0);
 }
+
+fn personal_editor_at(dir: PathBuf) -> Editor {
+    let seed = fixture();
+    let shared = &seed.shared;
+    Editor::new(
+        Some(dir),
+        Box::new(ChewingEngine {
+            word_lattice_builder: LatticeBuilder {
+                dict: shared.dict.clone(),
+                lookup_strategy: LookupStrategy::Standard,
+            },
+            decoder: shared.decoder.clone(),
+            string_table: shared.string_table.clone(),
+            #[cfg(feature = "d512")]
+            d512: Default::default(),
+        }),
+        shared.string_table.clone(),
+        shared.dict.clone(),
+        shared.user_dict.clone(),
+        shared.hist_dict.clone(),
+        shared.decoder.clone(),
+        AbbrevTable::new(),
+        SymbolSelector::new(b"".as_slice()).unwrap(),
+    )
+}
+#[test]
+fn personal_fix1_disabled_editor_opens_no_preference_files() {
+    use crate::user::candidate_ranking::test_io::{IoProbe, observe};
+    use std::sync::{Arc, atomic::Ordering};
+    let root = tempfile::tempdir().unwrap();
+    let probe = Arc::new(IoProbe::default());
+    let guard = observe(probe.clone());
+    let mut e = personal_editor_at(root.path().to_owned());
+    type_keys(&mut e, b"g4g4");
+    let _ = e.display();
+    e.commit().unwrap();
+    confirm(&mut e, true);
+    e.flush();
+    drop(e);
+    drop(guard);
+    assert_eq!(probe.opens.load(Ordering::SeqCst), 0);
+}
+fn personal_slow_io_does_not_block_editor(confirming: bool) {
+    use crate::user::candidate_ranking::{
+        FILE_NAME,
+        test_io::{IoProbe, observe},
+    };
+    use std::{
+        sync::{Arc, mpsc},
+        thread,
+        time::Duration,
+    };
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join(FILE_NAME),
+        b"{\"version\":1,\"groups\":[]}",
+    )
+    .unwrap();
+    let dir = root.path().to_owned();
+    let probe = Arc::new(IoProbe::default());
+    let worker_probe = probe.clone();
+    let (ready, wait_ready) = mpsc::channel();
+    let (start, wait_start) = mpsc::channel();
+    let (returned, wait_returned) = mpsc::channel();
+    let (lookup, wait_lookup) = mpsc::channel();
+    let (looked_up, wait_looked_up) = mpsc::channel();
+    let (cleanup, wait_cleanup) = mpsc::channel();
+    let ui = thread::spawn(move || {
+        let _observe = observe(worker_probe);
+        let mut e = personal_editor_at(dir);
+        e.set_editor_options(|o| {
+            o.personal_candidate_preference = true;
+            o.phrase_choice_rearward = true;
+            o.disable_auto_learn_phrase = true;
+        });
+        e.shared.ranking.activate();
+        e.shared.ranking.flush();
+        type_keys(&mut e, b"g4g4");
+        choose(&mut e, "世事");
+        e.commit().unwrap();
+        if !confirming {
+            confirm(&mut e, true);
+            e.shared.ranking.flush();
+        }
+        ready.send(()).unwrap();
+        wait_start.recv().unwrap();
+        if confirming {
+            confirm(&mut e, true);
+        } else {
+            e.shared.ranking.refresh();
+        }
+        returned.send(()).unwrap();
+        wait_lookup.recv().unwrap();
+        let keys = vec!["ㄕˋ".to_owned(), "ㄕˋ".to_owned()];
+        assert_eq!(e.shared.ranking.latest(&keys).as_deref(), Some("世事"));
+        let _ = e.shared.ranking.ranked(&[(keys, "世事".into())], false);
+        looked_up.send(()).unwrap();
+        wait_cleanup.recv().unwrap();
+    });
+    wait_ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (entered, release) = probe.block_next_open();
+    start.send(()).unwrap();
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    let quick = wait_returned
+        .recv_timeout(Duration::from_millis(200))
+        .is_ok();
+    lookup.send(()).unwrap();
+    let readable = wait_looked_up
+        .recv_timeout(Duration::from_millis(200))
+        .is_ok();
+    release.send(()).unwrap();
+    cleanup.send(()).unwrap();
+    ui.join().unwrap();
+    assert!(quick, "confirm/refresh waited for controlled slow I/O");
+    assert!(
+        readable,
+        "latest/ranked waited for a mutex held across slow I/O"
+    );
+}
+#[test]
+fn personal_fix1_confirm_and_lookups_do_not_wait_for_slow_io() {
+    personal_slow_io_does_not_block_editor(true);
+}
+#[test]
+fn personal_fix1_refresh_and_lookups_do_not_wait_for_slow_io() {
+    personal_slow_io_does_not_block_editor(false);
+}
+
+#[test]
+fn personal_fix1_disabling_keeps_confirmed_pending_writes() {
+    use crate::user::candidate_ranking::{
+        FILE_NAME,
+        test_io::{IoProbe, observe},
+    };
+    use std::{sync::Arc, time::Duration};
+    let root = tempfile::tempdir().unwrap();
+    let probe = Arc::new(IoProbe::default());
+    let _observe = observe(probe.clone());
+    let mut e = personal_editor_at(root.path().to_owned());
+    e.set_editor_options(|o| {
+        o.personal_candidate_preference = true;
+        o.phrase_choice_rearward = true;
+        o.disable_auto_learn_phrase = true;
+    });
+    e.shared.ranking.flush();
+    type_keys(&mut e, b"g4g4");
+    choose(&mut e, "世事");
+    e.commit().unwrap();
+    let (entered, release) = probe.block_next_open();
+    confirm(&mut e, true);
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    enabled(&mut e, false);
+    type_keys(&mut e, b"g4g4");
+    choose(&mut e, "逝世");
+    e.commit().unwrap();
+    confirm(&mut e, true);
+    release.send(()).unwrap();
+    e.flush();
+    assert_eq!(count(&e, &[syl![SH, TONE4]; 2], "世事"), 1);
+    assert_eq!(count(&e, &[syl![SH, TONE4]; 2], "逝世"), 0);
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.path().join(FILE_NAME)).unwrap()).unwrap();
+    assert_eq!(json["groups"][0]["counts"]["世事"], 1);
+    assert!(json["groups"][0]["counts"].get("逝世").is_none());
+}

@@ -623,6 +623,9 @@ impl Editor {
         let old = self.shared.options;
         update_op(&mut self.shared.options);
         if self.shared.options.personal_candidate_preference != old.personal_candidate_preference {
+            if self.shared.options.personal_candidate_preference {
+                self.shared.ranking.activate();
+            }
             self.shared
                 .com
                 .learning
@@ -937,7 +940,10 @@ impl Editor {
         &self.shared.notice_buffer
     }
     pub fn flush(&self) {
-        self.shared.ranking.save();
+        self.shared.ranking.flush();
+        self.flush_user_dictionaries();
+    }
+    fn flush_user_dictionaries(&self) {
         if let Some(ud) = self.shared.user_datadir.clone() {
             let user_dict = self.shared.user_dict.clone();
             let hist_dict = self.shared.hist_dict.clone();
@@ -994,6 +1000,12 @@ impl Editor {
                 return;
             };
         }
+    }
+}
+
+impl Drop for Editor {
+    fn drop(&mut self) {
+        self.shared.ranking.flush();
     }
 }
 
@@ -1544,7 +1556,7 @@ impl BasicEditor for Editor {
         debug!("comp: {:?}", &self.shared.com);
         const DIRTY_THRESHOLD: u16 = 0;
         if self.shared.dirty_level > DIRTY_THRESHOLD {
-            let _ = self.flush();
+            self.flush_user_dictionaries();
             self.shared.dirty_level = 0;
         }
         self.shared.last_key_behavior
