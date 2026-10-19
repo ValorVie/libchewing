@@ -9,3 +9,5 @@ pub use self::history_dict::{HistoryDict, HistoryDictError};
 pub use self::migrate::MigrateV4Error;
 pub use self::migrate::migrate_v3_to_v4;
 pub use self::migrate::should_migrate_from_v3;
+
+pub(crate) mod candidate_ranking;

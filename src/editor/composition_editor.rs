@@ -17,6 +17,7 @@ pub(crate) struct CompositionEditor {
     cursor_stack: Vec<usize>,
     /// TODO
     inner: Composition,
+    pub(crate) learning: super::personal::SelectionLearning,
     #[cfg(feature = "d512")]
     committed_prefix: u64,
 }
@@ -116,10 +117,12 @@ impl CompositionEditor {
         self.inner.len() == self.cursor
     }
     pub(crate) fn clear(&mut self) {
+        self.learning.clear();
         self.inner.clear();
         self.cursor = 0;
     }
     pub(crate) fn remove_front(&mut self, n: usize) {
+        self.learning.remove_front(n);
         self.inner.remove_front(n);
         #[cfg(feature = "d512")]
         {
@@ -129,6 +132,7 @@ impl CompositionEditor {
         self.cursor = self.cursor.saturating_sub(n);
     }
     pub(crate) fn remove_after_cursor(&mut self) {
+        self.learning.remove(self.cursor);
         self.inner.remove(self.cursor);
     }
     pub(crate) fn remove_before_cursor(&mut self) {
@@ -136,6 +140,7 @@ impl CompositionEditor {
             return;
         }
         self.cursor -= 1;
+        self.learning.remove(self.cursor);
         self.inner.remove(self.cursor);
     }
     pub(crate) fn move_cursor_to_end(&mut self) {
@@ -162,6 +167,7 @@ impl CompositionEditor {
         }
     }
     pub(crate) fn insert(&mut self, sym: Symbol) {
+        self.learning.insert(self.cursor);
         self.inner.insert(self.cursor, sym);
         self.cursor += 1;
     }
@@ -180,6 +186,7 @@ impl CompositionEditor {
         self.inner.set_gap(self.cursor, Gap::Break);
     }
     pub(crate) fn replace(&mut self, sym: Symbol) {
+        self.learning.replace(self.cursor);
         self.inner.replace(self.cursor, sym);
     }
     pub(crate) fn symbol_for_select(&self) -> Option<Symbol> {
@@ -189,6 +196,17 @@ impl CompositionEditor {
             self.cursor
         };
         self.inner.symbol(cursor)
+    }
+    pub(crate) fn consume_personal(&mut self, n: usize, output: &str) -> super::personal::Receipt {
+        self.learning.consume(n, &self.inner, output)
+    }
+    pub(crate) fn record_personal(
+        &mut self,
+        s: Selection,
+        strings: &crate::dictionary::StringTable,
+        store: &crate::user::candidate_ranking::CandidateRankingStore,
+    ) {
+        self.learning.record(s, &self.inner, strings, store);
     }
     pub(crate) fn select(&mut self, selection: Selection) {
         self.inner.push_selection(selection);

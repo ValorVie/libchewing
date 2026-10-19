@@ -44,11 +44,42 @@ impl ChewingEngine {
     }
     const MAX_OUT: u8 = 10;
 
-    pub(crate) fn convert<'a>(&'a self, com: &'a Composition) -> Vec<Outcome> {
+    pub(crate) fn native(&self, com: &Composition) -> Vec<Outcome> {
         let lattice = self.word_lattice_builder.build_lattice(com);
+        self.decode_lattice(com, lattice)
+    }
+    fn preferred(&self, original: &Composition, preferred: &Composition) -> Vec<Outcome> {
+        let mut lattice = self.word_lattice_builder.build_lattice(preferred);
+        for selection in preferred.selections() {
+            if original.selections().iter().any(|s| {
+                s.start == selection.start && s.end == selection.end && s.wid == selection.wid
+            }) {
+                continue;
+            }
+            let syllables: Vec<_> = original.symbols()[selection.start..selection.end]
+                .iter()
+                .filter_map(super::Symbol::to_syllable)
+                .collect();
+            let actual = self
+                .word_lattice_builder
+                .dict
+                .lookup(&syllables, self.word_lattice_builder.lookup_strategy)
+                .into_iter()
+                .find(|c| matches!(c,Candidate::Word{wid,..} if *wid==selection.wid));
+            if let Some(actual) = actual {
+                for edge in &mut lattice.edges[selection.start] {
+                    if edge.end as usize == selection.end {
+                        edge.cand = actual.clone();
+                    }
+                }
+            }
+        }
+        self.decode_lattice(preferred, lattice)
+    }
+    fn decode_lattice(&self, com: &Composition, lattice: super::Lattice) -> Vec<Outcome> {
         let hypothesis = self.decoder.decoden(lattice, Self::MAX_OUT);
 
-        let outcomes: Vec<Outcome> = hypothesis
+        hypothesis
             .into_iter()
             .map(|hyp| {
                 let cost = hyp.cost;
@@ -87,7 +118,11 @@ impl ChewingEngine {
                     debug!("Cost {:>5.2} {:?}", out.cost, out.intervals);
                 }
             })
-            .collect();
+            .collect()
+    }
+
+    pub(crate) fn convert(&self, com: &Composition) -> Vec<Outcome> {
+        let outcomes = self.native(com);
         #[cfg(feature = "d512")]
         if self.word_lattice_builder.lookup_strategy == crate::dictionary::LookupStrategy::Standard
         {
@@ -100,6 +135,15 @@ impl ChewingEngine {
 }
 
 impl ConversionEngine for ChewingEngine {
+    fn convert_native(&self, com: &Composition) -> Vec<Outcome> {
+        self.native(com)
+    }
+    fn convert_preferred(&self, original: &Composition, preferred: &Composition) -> Vec<Outcome> {
+        self.preferred(original, preferred)
+    }
+    fn supports_personal_preferences(&self) -> bool {
+        self.word_lattice_builder.lookup_strategy == crate::dictionary::LookupStrategy::Standard
+    }
     #[cfg(feature = "d512")]
     fn set_d512_state(&mut self, state: crate::d512::SharedD512State) {
         self.d512 = state;

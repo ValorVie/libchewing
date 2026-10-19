@@ -27,6 +27,9 @@ pub struct D512Options {
     pub mode: D512Mode,
     pub weight: f64,
     pub margin: f64,
+    /// Per latest-word hit in automatic mode; independent of the suggestion bonus.
+    pub personal_bonus: f64,
+    pub suggestion_personal_bonus: f64,
     pub timeout: Duration,
 }
 impl Default for D512Options {
@@ -35,6 +38,8 @@ impl Default for D512Options {
             mode: D512Mode::Automatic,
             weight: 0.25,
             margin: 0.5,
+            personal_bonus: 2.0,
+            suggestion_personal_bonus: 2.0,
             timeout: Duration::from_millis(100),
         }
     }
@@ -111,12 +116,14 @@ pub struct D512Report {
 pub struct D512CalibrationCandidate {
     pub text: String,
     pub raw: f64,
+    pub personal_hits: usize,
     pub model_logp: Option<f64>,
     pub fused: Option<f64>,
 }
 impl fmt::Debug for D512CalibrationCandidate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("D512CalibrationCandidate")
+            .field("personal_hits", &self.personal_hits)
             .field("raw", &self.raw)
             .field("model_logp", &self.model_logp)
             .field("fused", &self.fused)
@@ -135,6 +142,7 @@ pub struct D512Calibration {
     pub suggested: bool,
     pub weight: f64,
     pub margin: f64,
+    pub bonus: f64,
     pub mode: D512Mode,
 }
 impl fmt::Debug for D512Calibration {
@@ -148,6 +156,7 @@ impl fmt::Debug for D512Calibration {
             .field("suggested", &self.suggested)
             .field("weight", &self.weight)
             .field("margin", &self.margin)
+            .field("bonus", &self.bonus)
             .field("mode", &self.mode)
             .finish_non_exhaustive()
     }
@@ -194,6 +203,9 @@ pub struct D512State {
     successful_native: Option<Vec<Outcome>>,
     editor_committed_prefix: u64,
     suggested_path: Option<Vec<Selection>>,
+    personal: Option<crate::user::candidate_ranking::CandidateRankingStore>,
+    personal_revision: u64,
+    word_ranges: Vec<std::ops::Range<usize>>,
 }
 impl fmt::Debug for D512State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -212,6 +224,10 @@ impl D512State {
         self.scorer = None;
         self.invalidate();
         if !options.weight.is_finite()
+            || !options.personal_bonus.is_finite()
+            || !options.suggestion_personal_bonus.is_finite()
+            || options.personal_bonus < 0.
+            || options.suggestion_personal_bonus < 0.
             || !options.margin.is_finite()
             || options.weight < 0.
             || options.margin < 0.
@@ -223,6 +239,48 @@ impl D512State {
         self.options = options;
         self.scorer = scorer;
         Ok(())
+    }
+    pub(crate) fn prepare_personal(
+        &mut self,
+        store: Option<&crate::user::candidate_ranking::CandidateRankingStore>,
+        ranges: Vec<std::ops::Range<usize>>,
+    ) {
+        let revision = store.map(|s| s.revision()).unwrap_or(0);
+        if self.personal.is_some() != store.is_some()
+            || self.personal_revision != revision
+            || self.word_ranges != ranges
+        {
+            self.invalidate();
+        }
+        self.personal = store.cloned();
+        self.personal_revision = revision;
+        self.word_ranges = ranges;
+    }
+    fn personal_hits(&self, com: &Composition, out: &Outcome) -> usize {
+        let Some(store) = &self.personal else {
+            return 0;
+        };
+        out.intervals
+            .iter()
+            .filter(|i| {
+                if !i.is_phrase
+                    || i.end > com.len()
+                    || i.text.chars().count() != i.len()
+                    || (i.len() == 1
+                        && self
+                            .word_ranges
+                            .iter()
+                            .any(|r| r.start < i.end && i.start < r.end))
+                {
+                    return false;
+                }
+                let Some(keys) = crate::editor::personal::keys(&com.symbols()[i.start..i.end])
+                else {
+                    return false;
+                };
+                store.latest(&keys).as_deref() == Some(i.text.as_ref())
+            })
+            .count()
     }
     pub(crate) fn set_context(&mut self, context: &str) {
         let context: String = context
@@ -265,6 +323,13 @@ impl D512State {
         self.calibration.clone()
     }
     fn snapshot_matches(&self, current: &Composition, committed_prefix: u64) -> bool {
+        if self
+            .personal
+            .as_ref()
+            .is_some_and(|store| store.revision() != self.personal_revision)
+        {
+            return false;
+        }
         self.report_snapshot.as_ref().is_some_and(|snapshot| {
             snapshot.matches(current, committed_prefix, &self.context, self.options)
         })
@@ -332,6 +397,14 @@ impl D512State {
                 .collect::<Result<_, _>>()?;
             let mut candidates = vec![];
             let mut engine = vec![];
+            let mut personal_hits = vec![];
+            let bonus = if self.personal.is_none() {
+                0.
+            } else if self.options.mode == D512Mode::Suggestion {
+                self.options.suggestion_personal_bonus
+            } else {
+                self.options.personal_bonus
+            };
             for (i, out) in outcomes.iter().enumerate() {
                 let text: String = out.intervals.iter().map(|it| it.text.as_ref()).collect();
                 if text.chars().count() != reading.len() {
@@ -353,6 +426,7 @@ impl D512State {
                 }
                 candidates.push(text);
                 engine.push(-out.cost);
+                personal_hits.push(self.personal_hits(com, out));
                 report.candidate_indices.push(i);
             }
             if candidates.len() > 16 {
@@ -372,9 +446,11 @@ impl D512State {
                     .candidates
                     .iter()
                     .zip(&engine)
-                    .map(|(text, raw)| D512CalibrationCandidate {
+                    .zip(&personal_hits)
+                    .map(|((text, raw), hits)| D512CalibrationCandidate {
                         text: text.clone(),
                         raw: *raw,
+                        personal_hits: *hits,
                         model_logp: None,
                         fused: None,
                     })
@@ -386,6 +462,7 @@ impl D512State {
                 weight: self.options.weight,
                 margin: self.options.margin,
                 mode: self.options.mode,
+                bonus,
             });
             let model = self
                 .scorer
@@ -395,11 +472,28 @@ impl D512State {
             if Instant::now() >= deadline {
                 return Err(D512Error::Timeout);
             }
-            let (chosen, gap) = choose(&engine, &model, self.options.weight, self.options.margin)?;
+            let adjusted: Vec<_> = engine
+                .iter()
+                .zip(&personal_hits)
+                .map(|(e, h)| e + *h as f64 * bonus)
+                .collect();
+            let (chosen, gap) = if self.personal.is_some() {
+                choose_adjusted(
+                    &adjusted,
+                    &model,
+                    self.options.weight,
+                    self.options.margin,
+                    false,
+                )?
+            } else {
+                choose(&engine, &model, self.options.weight, self.options.margin)?
+            };
             if let Some(c) = self.calibration.as_mut() {
                 for (candidate, model) in c.candidates.iter_mut().zip(&model) {
                     candidate.model_logp = Some(*model);
-                    candidate.fused = Some(candidate.raw + c.weight * model);
+                    candidate.fused = Some(
+                        candidate.raw + c.weight * model + candidate.personal_hits as f64 * c.bonus,
+                    );
                 }
                 c.winner_index = (1..c.candidates.len()).fold(0, |best, i| {
                     if c.candidates[i].fused > c.candidates[best].fused {
@@ -520,6 +614,15 @@ fn choose(
     weight: f64,
     margin: f64,
 ) -> Result<(usize, f64), D512Error> {
+    choose_adjusted(engine, model, weight, margin, true)
+}
+fn choose_adjusted(
+    engine: &[f64],
+    model: &[f64],
+    weight: f64,
+    margin: f64,
+    require_native_order: bool,
+) -> Result<(usize, f64), D512Error> {
     if engine.is_empty()
         || engine.len() != model.len()
         || !weight.is_finite()
@@ -532,7 +635,7 @@ fn choose(
     if engine.iter().chain(model).any(|s| !s.is_finite()) {
         return Err(D512Error::NonFinite);
     }
-    if engine.iter().any(|s| *s > engine[0]) {
+    if require_native_order && engine.iter().any(|s| *s > engine[0]) {
         return Err(D512Error::InvalidConfig);
     }
     let scores: Vec<_> = engine

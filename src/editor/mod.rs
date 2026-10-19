@@ -15,7 +15,9 @@ use bstr::ByteSlice;
 use log::{debug, error, info, warn};
 use scoped_error::{ErrorExt, bail, expect_error, impl_context_error};
 
-pub use self::{abbrev::AbbrevTable, selection::symbol::SymbolSelector};
+pub use self::{
+    abbrev::AbbrevTable, personal::PersonalCandidateCommit, selection::symbol::SymbolSelector,
+};
 use self::{
     composition_editor::CompositionEditor,
     keybind::Prefix,
@@ -44,6 +46,9 @@ mod abbrev;
 pub mod action;
 mod composition_editor;
 pub mod keybind;
+pub(crate) mod personal;
+#[cfg(test)]
+mod personal_tests;
 mod selection;
 pub mod zhuyin_layout;
 
@@ -95,6 +100,8 @@ pub struct EditorOptions {
     pub conversion_engine: ConversionEngineKind,
     pub enable_fullwidth_toggle_key: bool,
     pub sort_candidates_by_frequency: bool,
+    /// Use confirmed manual choices for candidate ranking and reversible preedit preferences.
+    pub personal_candidate_preference: bool,
     pub auto_snapshot_selections: bool,
 }
 
@@ -119,6 +126,7 @@ impl Default for EditorOptions {
             conversion_engine: ConversionEngineKind::ChewingEngine,
             enable_fullwidth_toggle_key: true,
             sort_candidates_by_frequency: false,
+            personal_candidate_preference: false,
             auto_snapshot_selections: false,
         }
     }
@@ -204,6 +212,8 @@ pub(crate) struct SharedState {
     // static_words_path: PathBuf,
     // static_dict_path: PathBuf,
     user_datadir: Option<PathBuf>,
+    ranking: crate::user::candidate_ranking::CandidateRankingStore,
+    personal_receipt: personal::Receipt,
     // static_words: StringTable,
     // static_dict: StaticDict,
     com: CompositionEditor,
@@ -222,6 +232,7 @@ pub(crate) struct SharedState {
 
     dirty_level: u16,
     nth_conversion: usize,
+    manual_revolution: bool,
     commit_buffer: String,
     notice_buffer: String,
 }
@@ -386,6 +397,12 @@ impl Editor {
             shared: SharedState {
                 #[cfg(feature = "d512")]
                 d512,
+                ranking: crate::user::candidate_ranking::CandidateRankingStore::new(
+                    user_datadir
+                        .as_ref()
+                        .map(|p| p.join(crate::user::candidate_ranking::FILE_NAME)),
+                ),
+                personal_receipt: Default::default(),
                 user_datadir,
                 com: CompositionEditor::default(),
                 syl: Box::new(Standard::new()),
@@ -402,6 +419,7 @@ impl Editor {
                 last_key_behavior: EditorKeyBehavior::Absorb,
                 dirty_level: 0,
                 nth_conversion: 0,
+                manual_revolution: false,
                 commit_buffer: String::new(),
                 notice_buffer: String::new(),
             },
@@ -503,7 +521,24 @@ impl Editor {
         {
             return false;
         }
+        let accepted: Vec<_> = proposed
+            .to_composition()
+            .selections()
+            .iter()
+            .copied()
+            .filter(|s| !current.selections().iter().any(|m| same(s, m)))
+            .filter(|s| {
+                suggestion
+                    .changes
+                    .iter()
+                    .any(|change| change.start == s.start && change.end == s.end)
+            })
+            .collect();
+        drop(state);
         self.shared.com = proposed;
+        for selection in accepted {
+            self.shared.record_personal(selection);
+        }
         self.shared.nth_conversion = 0;
         self.shared.last_key_behavior = EditorKeyBehavior::Absorb;
         true
@@ -545,7 +580,26 @@ impl Editor {
         self.shared.clear();
     }
     pub fn ack(&mut self) {
+        self.shared.discard_personal_receipt();
         self.shared.commit_buffer.clear();
+    }
+    /// Confirm the most recent commit only after the client inserted its exact text.
+    /// Pass false for failed, missing, transformed or rejected insertion. Duplicate calls are inert.
+    pub fn confirm_personal_candidate_commit(&mut self, inserted_unchanged: bool) {
+        if let Some(receipt) = self.take_personal_candidate_commit() {
+            receipt.confirm(inserted_unchanged);
+        }
+    }
+    /// Detach an owned receipt before processing another key or clearing output.
+    /// It survives normal editor clear/commit, but switching the preference off
+    /// revokes its learning epoch. Confirm it on the editor's thread.
+    pub fn take_personal_candidate_commit(&mut self) -> Option<PersonalCandidateCommit> {
+        let receipt = std::mem::take(&mut self.shared.personal_receipt);
+        if self.shared.commit_buffer.is_empty() {
+            receipt.cancel();
+            return None;
+        }
+        PersonalCandidateCommit::new(receipt, self.shared.ranking.clone())
     }
     pub fn clear_composition_editor(&mut self) {
         self.shared.clear_composition();
@@ -565,8 +619,20 @@ impl Editor {
     where
         F: FnOnce(&mut EditorOptions),
     {
+        self.shared.finish_manual_revolution();
         let old = self.shared.options;
         update_op(&mut self.shared.options);
+        if self.shared.options.personal_candidate_preference != old.personal_candidate_preference {
+            self.shared
+                .com
+                .learning
+                .reset_epoch(self.shared.options.personal_candidate_preference);
+            self.shared.discard_personal_receipt();
+            #[cfg(feature = "d512")]
+            if let Ok(mut state) = self.shared.d512.lock() {
+                state.invalidate();
+            }
+        }
         if self.shared.options.language_mode != old.language_mode {
             self.cancel_entering_syllable();
         }
@@ -871,6 +937,7 @@ impl Editor {
         &self.shared.notice_buffer
     }
     pub fn flush(&self) {
+        self.shared.ranking.save();
         if let Some(ud) = self.shared.user_datadir.clone() {
             let user_dict = self.shared.user_dict.clone();
             let hist_dict = self.shared.hist_dict.clone();
@@ -931,7 +998,154 @@ impl Editor {
 }
 
 impl SharedState {
+    fn personal_enabled(&self) -> bool {
+        self.options.personal_candidate_preference && self.conv.supports_personal_preferences()
+    }
+    fn finish_manual_revolution(&mut self) {
+        if !self.manual_revolution {
+            return;
+        }
+        self.manual_revolution = false;
+        let paths = self.hypotheses();
+        if paths.is_empty() {
+            return;
+        }
+        let chosen = &paths[self.nth_conversion % paths.len()];
+        for interval in &chosen.intervals {
+            if !interval.is_phrase {
+                continue;
+            }
+            let selection = Selection {
+                start: interval.start,
+                end: interval.end,
+                wid: self.string_table.intern(&interval.text),
+            };
+            self.com.select(selection);
+            if !paths[0].intervals.iter().any(|i| {
+                i.start == interval.start && i.end == interval.end && i.text == interval.text
+            }) {
+                self.record_personal(selection);
+            }
+        }
+        self.nth_conversion = 0;
+    }
+    fn protect_remainder(&mut self, start: usize, text: &str) {
+        let len = text.chars().count();
+        if len == 0 || start + len > self.com.len() {
+            return;
+        }
+        let syllables: Option<Vec<_>> = self.com.symbols()[start..start + len]
+            .iter()
+            .map(Symbol::to_syllable)
+            .collect();
+        let Some(syllables) = syllables else {
+            return;
+        };
+        let lookup = |keys: &[Syllable], word: &str| {
+            self.dict
+                .lookup(keys, LookupStrategy::Standard)
+                .into_iter()
+                .find_map(|c| match c {
+                    crate::model::Candidate::Word { wid, .. }
+                        if self.string_table.get_text(wid).as_deref() == Some(word) =>
+                    {
+                        Some(wid)
+                    }
+                    _ => None,
+                })
+        };
+        if let Some(wid) = lookup(&syllables, text) {
+            self.com.select(Selection {
+                start,
+                end: start + len,
+                wid,
+            });
+            return;
+        }
+        let pieces: Option<Vec<_>> = text
+            .chars()
+            .enumerate()
+            .map(|(i, c)| {
+                lookup(&syllables[i..i + 1], &c.to_string()).map(|wid| Selection {
+                    start: start + i,
+                    end: start + i + 1,
+                    wid,
+                })
+            })
+            .collect();
+        if let Some(pieces) = pieces {
+            for p in pieces {
+                self.com.select(p);
+            }
+        }
+    }
+    fn delete_at_cursor(&mut self, backward: bool) {
+        let index = if backward {
+            self.com.cursor().checked_sub(1)
+        } else {
+            Some(self.com.cursor())
+        };
+        let pieces = if self.personal_enabled() {
+            index.and_then(|index| {
+                let selection = self
+                    .com
+                    .to_composition()
+                    .selections()
+                    .iter()
+                    .copied()
+                    .find(|s| s.start <= index && index < s.end)?;
+                let word = self.string_table.get_text(selection.wid)?;
+                if word.chars().count() != selection.len() {
+                    return None;
+                }
+                let before: String = word.chars().take(index - selection.start).collect();
+                let after: String = word.chars().skip(index - selection.start + 1).collect();
+                Some(vec![(selection.start, before), (index, after)])
+            })
+        } else {
+            None
+        };
+        if backward {
+            self.com.remove_before_cursor();
+        } else {
+            self.com.remove_after_cursor();
+        }
+        if let Some(pieces) = pieces {
+            for (start, text) in pieces {
+                self.protect_remainder(start, &text);
+            }
+        }
+    }
+    fn discard_personal_receipt(&mut self) {
+        std::mem::take(&mut self.personal_receipt).cancel();
+    }
+    fn record_personal(&mut self, selection: Selection) {
+        if !self.personal_enabled() {
+            return;
+        }
+        let syllables: Option<Vec<_>> = self.com.symbols()[selection.start..selection.end]
+            .iter()
+            .map(Symbol::to_syllable)
+            .collect();
+        let Some(syllables) = syllables else {
+            return;
+        };
+        if !self
+            .dict
+            .lookup(&syllables, LookupStrategy::Standard)
+            .iter()
+            .any(|c| matches!(c,crate::model::Candidate::Word{wid,..} if *wid==selection.wid))
+        {
+            return;
+        }
+        self.com
+            .record_personal(selection, &self.string_table, &self.ranking);
+    }
     fn set_conversion_engine(&mut self, engine: Box<dyn ConversionEngine>) {
+        self.com
+            .learning
+            .reset_epoch(self.options.personal_candidate_preference);
+        self.discard_personal_receipt();
         self.conv = engine;
         #[cfg(feature = "d512")]
         {
@@ -949,12 +1163,14 @@ impl SharedState {
         }
     }
     fn clear(&mut self) {
+        self.discard_personal_receipt();
         self.last_key_behavior = EditorKeyBehavior::Absorb;
         self.clear_composition();
         self.syl.clear();
         self.commit_buffer.clear();
         self.notice_buffer.clear();
         self.nth_conversion = 0;
+        self.manual_revolution = false;
     }
     fn conversion(&self) -> Vec<Interval> {
         let paths = self.hypotheses();
@@ -964,11 +1180,57 @@ impl SharedState {
         paths[self.nth_conversion % paths.len()].intervals.clone()
     }
     fn hypotheses(&self) -> Vec<Outcome> {
+        if !self.conv.supports_personal_preferences() {
+            return self.conv.convert(self.com.as_ref());
+        }
+        let mut outcomes = self.conv.convert_native(self.com.as_ref());
+        #[cfg(feature = "d512")]
+        let word_ranges = outcomes
+            .first()
+            .map(|o| {
+                o.intervals
+                    .iter()
+                    .filter(|i| i.len() > 1)
+                    .map(|i| i.start..i.end)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if self.personal_enabled()
+            && let Some(base) = outcomes.first()
+            && let Some(proposed) = personal::preferred(
+                self.com.as_ref(),
+                base,
+                &self.ranking,
+                &self.dict,
+                &self.string_table,
+            )
+            && let Some(preferred) = self
+                .conv
+                .convert_preferred(self.com.as_ref(), &proposed)
+                .into_iter()
+                .next()
+        {
+            let text = |o: &Outcome| {
+                o.intervals
+                    .iter()
+                    .map(|i| i.text.as_ref())
+                    .collect::<String>()
+            };
+            if let Some(index) = outcomes.iter().position(|o| text(o) == text(&preferred)) {
+                outcomes.remove(index);
+            }
+            outcomes.insert(0, preferred);
+        }
         #[cfg(feature = "d512")]
         if let Ok(mut state) = self.d512.try_lock() {
             state.set_editor_prefix(self.com.committed_prefix());
+            state.prepare_personal(
+                self.personal_enabled().then_some(&self.ranking),
+                word_ranges,
+            );
+            return state.rerank(self.com.as_ref(), &self.string_table, outcomes);
         }
-        self.conv.convert(self.com.as_ref())
+        outcomes
     }
     fn intervals(&self) -> impl DoubleEndedIterator<Item = Interval> + use<> {
         self.conversion().into_iter()
@@ -1115,6 +1377,7 @@ impl SharedState {
         self.com.pop_cursor();
     }
     fn commit(&mut self) {
+        self.finish_manual_revolution();
         self.commit_buffer.clear();
         let intervals = self.conversion();
         debug!("commit {}", self.com);
@@ -1125,6 +1388,8 @@ impl SharedState {
             .into_iter()
             .map(|interval| interval.text)
             .collect::<String>();
+        self.discard_personal_receipt();
+        self.personal_receipt = self.com.consume_personal(self.com.len(), &output);
         self.commit_buffer.push_str(&output);
         self.clear_composition();
         self.nth_conversion = 0;
@@ -1146,6 +1411,13 @@ impl SharedState {
                 break;
             }
         }
+        let output = self
+            .conversion()
+            .iter()
+            .map(|i| i.text.as_ref())
+            .collect::<String>();
+        self.discard_personal_receipt();
+        self.personal_receipt = self.com.consume_personal(remove, &output);
         self.com.remove_front(remove);
         debug!(
             "buffer has {} symbols left after auto commit",
@@ -1228,12 +1500,19 @@ fn collect_new_words(intervals: &[Interval], symbols: &[Symbol]) -> Vec<(Vec<Syl
 impl BasicEditor for Editor {
     fn process_keyevent(&mut self, key_event: KeyboardEvent) -> EditorKeyBehavior {
         info!("process {}", key_event);
+        if self.is_entering() && self.shared.com.is_empty() && self.shared.personal_enabled() {
+            self.shared.ranking.refresh();
+        }
         // reset?
         self.shared.notice_buffer.clear();
         if self.shared.last_key_behavior == EditorKeyBehavior::Commit {
+            self.shared.discard_personal_receipt();
             self.shared.commit_buffer.clear();
         }
 
+        if key_event.ksym != SYM_TAB {
+            self.shared.finish_manual_revolution();
+        }
         let orig_nth_conv = self.shared.nth_conversion;
         match self.state.next(&mut self.shared, key_event) {
             Transition::ToState(to_state) => {
@@ -1390,7 +1669,7 @@ impl State for Entering {
                 if shared.com.is_empty() {
                     self.spin_ignore()
                 } else {
-                    shared.com.remove_before_cursor();
+                    shared.delete_at_cursor(true);
                     self.spin_absorb()
                 }
             }
@@ -1429,6 +1708,9 @@ impl State for Entering {
                 self.spin_ignore()
             }
             SYM_TAB if shared.com.is_end_of_buffer() => {
+                if shared.personal_enabled() {
+                    shared.manual_revolution = true;
+                }
                 shared.nth_conversion += 1;
                 self.spin_absorb()
             }
@@ -1449,7 +1731,7 @@ impl State for Entering {
                 if shared.com.is_end_of_buffer() {
                     self.spin_ignore()
                 } else {
-                    shared.com.remove_after_cursor();
+                    shared.delete_at_cursor(false);
                     self.spin_absorb()
                 }
             }
@@ -1834,6 +2116,7 @@ impl Selecting {
                         };
                         let len = selection.len();
                         editor.com.select(selection);
+                        editor.record_personal(selection);
                         debug!("Auto Shift {}", editor.options.auto_shift_cursor);
                         editor.com.pop_cursor();
                         if editor.options.auto_shift_cursor {

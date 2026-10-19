@@ -48,3 +48,10 @@ editor.set_editor_options(|options| options.ctrl_symbol_new_phonetic = true);
 ```
 
 Both fields are Rust API options; no C configuration keys are added.
+
+
+## Personal candidate preference
+
+`personal_candidate_preference: bool` defaults to **false**. See
+[personal candidate preference](personal-candidate-preference.md) for confirmed
+commit learning, single-character window protection, storage, and D512 bonuses.

@@ -24,6 +24,18 @@ mod word_lattice;
 /// put intervals should cover the whole range of inputs, sorted in first in
 /// first out order.
 pub trait ConversionEngine: Debug {
+    /// Native conversion without optional reranking; used for reversible preferences.
+    fn convert_native(&self, comp: &Composition) -> Vec<Outcome> {
+        self.convert(comp)
+    }
+    /// Convert temporary preferences while retaining original dictionary costs.
+    fn convert_preferred(&self, _original: &Composition, preferred: &Composition) -> Vec<Outcome> {
+        self.convert_native(preferred)
+    }
+    /// True only for the standard Chewing engine, not fuzzy, simple or external converters.
+    fn supports_personal_preferences(&self) -> bool {
+        false
+    }
     #[cfg(feature = "d512")]
     fn set_d512_state(&mut self, _state: crate::d512::SharedD512State) {}
     fn convert<'a>(&'a self, comp: &'a Composition) -> Vec<Outcome>;

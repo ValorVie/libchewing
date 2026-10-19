@@ -1,4 +1,4 @@
-use std::cmp::min;
+use std::{cell::RefCell, cmp::min};
 
 use scoped_error::{bail, expect_error};
 
@@ -18,6 +18,7 @@ pub(crate) struct PhraseSelector {
     orig: usize,
     lookup_strategy: LookupStrategy,
     com: Composition,
+    snapshot: RefCell<Option<(usize, usize, Vec<WordId>)>>,
 }
 
 impl PhraseSelector {
@@ -27,6 +28,7 @@ impl PhraseSelector {
         com: Composition,
     ) -> PhraseSelector {
         PhraseSelector {
+            snapshot: Default::default(),
             begin: 0,
             end: com.len(),
             forward_select,
@@ -239,6 +241,12 @@ impl PhraseSelector {
     }
 
     pub(crate) fn candidates(&self, editor: &SharedState) -> Vec<WordId> {
+        if let Some((begin, end, words)) = self.snapshot.borrow().as_ref()
+            && (*begin, *end) == (self.begin, self.end)
+        {
+            return words.clone();
+        }
+        self.snapshot.borrow_mut().take();
         let syllables: Vec<Syllable> = self.com.symbols()[self.begin..self.end]
             .iter()
             .map(|s| s.to_syllable().unwrap_or_default())
@@ -248,16 +256,52 @@ impl PhraseSelector {
             .lookup(&syllables, self.lookup_strategy)
             .into_iter()
             .collect::<Vec<_>>();
+        let mut records = candidates
+            .iter()
+            .cloned()
+            .map(|c| (syllables.clone(), c))
+            .collect::<Vec<_>>();
         if self.end - self.begin == 1 {
             let alt = editor
                 .syl
                 .alt_syllables(self.com.symbol(self.begin).unwrap().to_syllable().unwrap());
             for &syl in alt {
-                candidates.extend(editor.dict.lookup(&[syl], self.lookup_strategy).into_iter())
+                let extra = editor.dict.lookup(&[syl], self.lookup_strategy);
+                records.extend(extra.iter().cloned().map(|c| (vec![syl], c)));
+                candidates.extend(extra);
             }
         }
         if editor.options.sort_candidates_by_frequency {
             candidates = editor.decoder.rank(candidates);
+        }
+        if editor.personal_enabled() {
+            let pairs: Vec<_> = candidates
+                .iter()
+                .map(|c| {
+                    let index = records
+                        .iter()
+                        .position(|(_, original)| original == c)
+                        .unwrap();
+                    let (keys, c) = records.remove(index);
+                    let crate::model::Candidate::Word { wid, .. } = c else {
+                        unreachable!()
+                    };
+                    (
+                        keys.iter()
+                            .map(|s| s.to_string().trim_end_matches('ˉ').to_owned())
+                            .collect(),
+                        editor.string_table.get_text(wid).unwrap().to_string(),
+                    )
+                })
+                .collect();
+            let words: Vec<_> = editor
+                .ranking
+                .ranked(&pairs, false)
+                .into_iter()
+                .map(|(_, w)| editor.string_table.get_wid(&w).unwrap())
+                .collect();
+            *self.snapshot.borrow_mut() = Some((self.begin, self.end, words.clone()));
+            return words;
         }
         candidates
             .into_iter()
@@ -295,6 +339,7 @@ mod tests {
         let mut com = Composition::new();
         com.push(Symbol::from(syl![C, E, TONE4]));
         let mut sel = PhraseSelector {
+            snapshot: Default::default(),
             begin: 0,
             end: 1,
             forward_select: false,
@@ -316,6 +361,7 @@ mod tests {
         let mut com = Composition::new();
         com.push(Symbol::from(','));
         let mut sel = PhraseSelector {
+            snapshot: Default::default(),
             begin: 0,
             end: 1,
             forward_select: false,
@@ -333,6 +379,7 @@ mod tests {
         let mut com = Composition::new();
         com.push(Symbol::from(syl![C, E, TONE4]));
         let mut sel = PhraseSelector {
+            snapshot: Default::default(),
             begin: 0,
             end: 1,
             forward_select: true,
@@ -354,6 +401,7 @@ mod tests {
         let mut com = Composition::new();
         com.push(Symbol::from(','));
         let mut sel = PhraseSelector {
+            snapshot: Default::default(),
             begin: 0,
             end: 1,
             forward_select: true,
@@ -376,6 +424,7 @@ mod tests {
             com.push(sym);
         }
         let sel = PhraseSelector {
+            snapshot: Default::default(),
             begin: 0,
             end: 2,
             forward_select: false,
@@ -396,6 +445,7 @@ mod tests {
             com.push(sym);
         }
         let sel = PhraseSelector {
+            snapshot: Default::default(),
             begin: 0,
             end: 2,
             forward_select: false,
