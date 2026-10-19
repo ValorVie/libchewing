@@ -43,10 +43,11 @@ in reverse order within an editor. Clearing an uncommitted tail cancels it.
 The current automatic overflow path emits complete intervals, so it preserves
 a selected word whose suffix has no standalone dictionary entry.
 
-Confirm before editor teardown if the selection should be learned. A receipt
-does not keep the store alive: once its lifecycle owner is gone, late confirmation
-is discarded without learning or waiting for worker I/O. Already confirmed events
-are flushed during teardown.
+Confirm before editor teardown if the selection should be learned. Each editor
+has its own learning epoch; turning it off or dropping it revokes only its own
+outstanding receipts, even if another editor keeps the store alive. A receipt
+does not keep the store alive. Already confirmed events remain queued for the
+shared worker; explicit flush or final-owner teardown waits for their persistence.
 
 ## Candidate order and reversible preedit
 
@@ -78,8 +79,11 @@ The candidate window retains its original single-character order, including
 
 `candidate-ranking.json` resides beside `user_dict.csv` and `history_dict.bin`
 under `SearchPath::user_file_path` (currently the user directory's `v4` folder).
-`Editor::new` uses its supplied versioned `user_datadir`; an editor without one
-keeps an in-memory store. The schema matches Mac `Snapshot` version 1:
+`Editor::new` uses its supplied versioned `user_datadir`. Within one process,
+editors using the same preference-file `PathBuf` share one live store and worker.
+The registry holds weak references and performs no file I/O or path
+canonicalization. An editor without a path keeps an independent in-memory store.
+The schema matches Mac `Snapshot` version 1:
 
 ```json
 {"version":1,"groups":[{"keyArray":["ㄕˋ","ㄕˋ"],"latest":"世事","counts":{"世事":1}}]}
@@ -92,11 +96,13 @@ learning continues; saving never replaces the unreadable file. Logs and Debug
 output for the new store/receipts do not contain readings, words, or file data.
 
 The store retains only its path until personal preference is first enabled.
-An editor that never enables it neither reads nor writes preference files.
-First enable starts one background worker for that store. Initial loading is
+If no editor sharing that path enables it, the store neither reads nor writes
+preference files. First enable starts one background worker for that store;
+other editors reuse the loaded state and worker. Initial loading is
 asynchronous; choices confirmed during loading remain visible and are merged
-with the loaded counts. Turning the switch off prevents new learning and keeps
-already confirmed pending events eligible for persistence.
+with the loaded counts. Turning an editor's switch off prevents its new learning
+and keeps already confirmed pending events eligible for persistence. Other
+editors' switches and learning epochs are independent.
 
 Confirmation updates memory and queues persistence. Refresh requests also go to
 the worker. Receipts stay on the editor's thread. The worker takes owned confirmed
@@ -108,10 +114,13 @@ snapshot pointer; candidate sorting and whole-snapshot comparison run outside
 it. A save publishes its snapshot and retires only that batch's increments, so
 choices confirmed during an in-flight write remain visible exactly once.
 
-`Editor::flush()` is a lifecycle barrier that waits for queued preference work;
-Editor drop also waits. Neither the key path nor receipt confirmation calls
-this barrier. The last store owner requests final persistence and joins the
-worker. Flush and shutdown may wait for another writer's file lock. Normal
+`Editor::flush()` is a lifecycle barrier that waits for queued preference work.
+Editor drop revokes its own epoch without calling this barrier. Constructing a
+replacement with the same path before dropping the old editor keeps the store
+alive and avoids worker teardown. The last store owner still requests final
+persistence and joins the worker; its drop can wait. Flush and shutdown may wait
+for another writer's file lock. Neither the key path nor receipt confirmation
+calls the barrier. Normal
 background saves use a stable `candidate-ranking.json.lock` sidecar with
 nonblocking `File::try_lock`; contention retains events for a later save or
 flush. Writers reread and merge under the file lock, write a unique
@@ -121,11 +130,12 @@ remains read-only for the store's lifetime. New files use mode 0600 on Unix.
 No changes means no file write. New composition requests refresh; visibility
 of another writer's changes is asynchronous. Across independent processes,
 latest follows serialized save order; selection-order sequence numbers are
-local to an editor.
+local to a shared store.
 
 The caller never waits for preference I/O during keys or confirmation. This
 is not a hard scheduling-latency or power-loss durability guarantee: lifecycle
-flush can wait on storage and the containing directory is not separately synced.
+flush and final-owner drop can wait on storage, and the containing directory is
+not separately synced.
 See the Rust contracts for
 [channels](https://doc.rust-lang.org/std/sync/mpsc/index.html),
 [locking](https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock),

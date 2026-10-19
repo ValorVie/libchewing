@@ -1006,7 +1006,8 @@ impl Editor {
 
 impl Drop for Editor {
     fn drop(&mut self) {
-        self.shared.ranking.flush();
+        // A shared store may outlive this editor; its receipts must not learn later.
+        self.shared.com.learning.reset_epoch(false);
     }
 }
 

@@ -140,7 +140,8 @@ impl fmt::Debug for Receipt {
 /// Owned confirmation for an exact commit buffer. Keep it through the edit-session
 /// callback; call `confirm(true)` only when that text was inserted unchanged.
 /// Dropping a receipt rejects it. Debug never exposes readings or text.
-/// Confirmation after the editor's store has been dropped is ignored.
+/// Confirmation after the originating editor is dropped is ignored, even when
+/// another editor keeps the shared store alive.
 #[derive(Debug)]
 pub struct PersonalCandidateCommit {
     receipt: Option<Receipt>,

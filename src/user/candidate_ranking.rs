@@ -2,7 +2,7 @@
 //! Independent, non-decaying manual-choice statistics (Mac Snapshot version 1).
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fmt,
     fs::{self, OpenOptions},
     hash::{BuildHasher, Hasher, RandomState},
@@ -83,12 +83,23 @@ impl fmt::Debug for CandidateRankingStore {
 }
 impl CandidateRankingStore {
     pub(crate) fn new(path: Option<PathBuf>) -> Self {
-        Self {
-            shared: Arc::new(Shared {
-                path,
-                ..Default::default()
-            }),
+        let Some(path) = path else {
+            return Self::default();
+        };
+        static STORES: OnceLock<Mutex<HashMap<PathBuf, Weak<Shared>>>> = OnceLock::new();
+        let mut stores = STORES.get_or_init(Mutex::default).lock().unwrap();
+        // Weak entries never extend a worker's lifetime. Prune paths whose last
+        // owner has gone; this does not perform any file I/O or wait for workers.
+        stores.retain(|_, shared| shared.strong_count() != 0);
+        if let Some(shared) = stores.get(&path).and_then(Weak::upgrade) {
+            return Self { shared };
         }
+        let shared = Arc::new(Shared {
+            path: Some(path.clone()),
+            ..Default::default()
+        });
+        stores.insert(path, Arc::downgrade(&shared));
+        Self { shared }
     }
     pub(crate) fn downgrade(&self) -> WeakCandidateRankingStore {
         WeakCandidateRankingStore {
@@ -571,11 +582,14 @@ mod tests {
         record(&s, "世事");
         s.save();
         s.flush();
+        drop(s);
         let loaded = open_store(Some(path.clone()));
         assert_eq!(loaded.count(&k(), "世事"), 1);
         let json: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(json["version"], 1);
         assert_eq!(json["groups"][0]["keyArray"], serde_json::json!(k()));
+        // A fresh lifetime is needed to test each unreadable initial snapshot.
+        drop(loaded);
         for bad in [
             "broken",
             "{\"version\":999,\"groups\":[]}",
@@ -625,6 +639,8 @@ mod storage_boundary_tests {
     use super::*;
     #[test]
     fn personal_store_two_independent_writers_do_not_erase_counts() {
+        // Same-process handles share state; the four-process test below keeps
+        // exercising genuinely independent writers.
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("ranking.json");
         let a = open_store(Some(path.clone()));
@@ -701,6 +717,7 @@ mod additional_storage_tests {
         s.save();
         s.flush();
         assert_eq!(s.count(&["ㄕˋ".into()], "世"), u64::MAX);
+        drop(s);
         let bad = serde_json::to_vec(&json!({"version":1,"groups":[group.clone(),group]})).unwrap();
         fs::write(&path, &bad).unwrap();
         let broken = open_store(Some(path.clone()));

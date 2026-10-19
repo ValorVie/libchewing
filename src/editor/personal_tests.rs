@@ -908,3 +908,178 @@ fn personal_fix2_owned_receipt_learns_while_editor_is_alive() {
         serde_json::from_slice(&fs::read(root.path().join(FILE_NAME)).unwrap()).unwrap();
     assert_eq!(json["groups"][0]["counts"]["世事"], 1);
 }
+
+fn personal_enabled_editor_at(dir: PathBuf) -> Editor {
+    let mut e = personal_editor_at(dir);
+    e.set_editor_options(|o| {
+        o.personal_candidate_preference = true;
+        o.phrase_choice_rearward = true;
+        o.disable_auto_learn_phrase = true;
+    });
+    e
+}
+
+fn personal_owned_choice(e: &mut Editor, word: &str) -> PersonalCandidateCommit {
+    e.clear();
+    type_keys(e, b"g4g4");
+    choose(e, word);
+    e.commit().unwrap();
+    let receipt = e.take_personal_candidate_commit().unwrap();
+    e.ack();
+    receipt
+}
+
+fn personal_lock_file(dir: &std::path::Path) -> File {
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("candidate-ranking.json.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    lock
+}
+
+#[test]
+fn personal_fix3_replacement_and_next_key_do_not_wait_for_file_lock() {
+    use crate::user::candidate_ranking::FILE_NAME;
+    use std::{sync::mpsc, thread, time::Duration};
+    let root = tempfile::tempdir().unwrap();
+    let lock = personal_lock_file(root.path());
+    let dir = root.path().to_owned();
+    let (done, wait_done) = mpsc::channel();
+    let ui = thread::spawn(move || {
+        let mut e = personal_enabled_editor_at(dir.clone());
+        commit_choice(&mut e, b"g4g4", "世事");
+        // Construct the replacement before dropping the old editor, as TSF does.
+        e = personal_enabled_editor_at(dir);
+        type_keys(&mut e, b"g4");
+        done.send(()).unwrap();
+        // The final owner may wait; the observed operation above must not.
+    });
+    let quick = wait_done.recv_timeout(Duration::from_millis(200)).is_ok();
+    drop(lock);
+    if !quick {
+        wait_done.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+    ui.join().unwrap();
+    assert!(
+        quick,
+        "editor replacement or next key waited for the file lock"
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.path().join(FILE_NAME)).unwrap()).unwrap();
+    assert_eq!(json["groups"][0]["counts"]["世事"], 1);
+}
+
+#[test]
+fn personal_fix3_shared_editors_keep_independent_epochs_and_final_persistence() {
+    use crate::user::candidate_ranking::{
+        FILE_NAME,
+        test_io::{IoProbe, observe},
+    };
+    use std::{
+        sync::{Arc, atomic::Ordering, mpsc},
+        thread,
+        time::Duration,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let lock = personal_lock_file(root.path());
+    let dir = root.path().to_owned();
+    let (done, wait_done) = mpsc::channel();
+    let ui = thread::spawn(move || {
+        let probe = Arc::new(IoProbe::default());
+        let _observe = observe(probe.clone());
+        let mut a = personal_enabled_editor_at(dir.clone());
+        a.shared.ranking.flush();
+        let initial_opens = probe.opens.load(Ordering::SeqCst);
+        let mut b = personal_enabled_editor_at(dir);
+        b.shared.ranking.flush();
+        let reused_load = probe.opens.load(Ordering::SeqCst) == initial_opens;
+        personal_owned_choice(&mut a, "世事").confirm(true);
+        let visible = count(&b, &[syl![SH, TONE4]; 2], "世事");
+        type_keys(&mut b, b"g4g4");
+        let preedit = b.display();
+        let rejected = personal_owned_choice(&mut a, "逝世");
+        let accepted = personal_owned_choice(&mut b, "世事");
+        enabled(&mut a, false);
+        rejected.confirm(true);
+        accepted.confirm(true);
+        let learned_by_b = count(&b, &[syl![SH, TONE4]; 2], "世事");
+        let disabled_choice = count(&a, &[syl![SH, TONE4]; 2], "逝世");
+        enabled(&mut a, true);
+        let late = personal_owned_choice(&mut a, "逝世");
+        drop(a);
+        late.confirm(true);
+        let late_choice = count(&b, &[syl![SH, TONE4]; 2], "逝世");
+        personal_owned_choice(&mut b, "世事").confirm(true);
+        let after_drop = count(&b, &[syl![SH, TONE4]; 2], "世事");
+        done.send((
+            reused_load,
+            preedit,
+            [
+                visible,
+                learned_by_b,
+                disabled_choice,
+                late_choice,
+                after_drop,
+            ],
+        ))
+        .unwrap();
+    });
+    let early = wait_done.recv_timeout(Duration::from_millis(200));
+    let quick = early.is_ok();
+    drop(lock);
+    let (reused_load, preedit, counts) =
+        early.unwrap_or_else(|_| wait_done.recv_timeout(Duration::from_secs(5)).unwrap());
+    ui.join().unwrap();
+    assert!(reused_load, "second editor started another initial load");
+    assert_eq!(counts, [1, 2, 0, 0, 3]);
+    assert_eq!(preedit, "世事");
+    assert!(quick, "dropping one shared editor waited for the file lock");
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.path().join(FILE_NAME)).unwrap()).unwrap();
+    assert_eq!(json["groups"][0]["counts"]["世事"], 3);
+    assert!(json["groups"][0]["counts"].get("逝世").is_none());
+}
+
+#[test]
+fn personal_fix3_explicit_flush_still_waits_and_persists() {
+    use crate::user::candidate_ranking::FILE_NAME;
+    use std::{sync::mpsc, thread, time::Duration};
+    let root = tempfile::tempdir().unwrap();
+    let lock = personal_lock_file(root.path());
+    let dir = root.path().to_owned();
+    let (ready, wait_ready) = mpsc::channel();
+    let (done, wait_done) = mpsc::channel();
+    let ui = thread::spawn(move || {
+        let mut e = personal_enabled_editor_at(dir);
+        personal_owned_choice(&mut e, "世事").confirm(true);
+        ready.send(()).unwrap();
+        e.flush();
+        done.send(()).unwrap();
+    });
+    wait_ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    let blocked = wait_done.recv_timeout(Duration::from_millis(200)).is_err();
+    drop(lock);
+    if blocked {
+        wait_done.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+    ui.join().unwrap();
+    assert!(blocked, "explicit flush returned before persistence");
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.path().join(FILE_NAME)).unwrap()).unwrap();
+    assert_eq!(json["groups"][0]["counts"]["世事"], 1);
+}
+
+#[test]
+fn personal_fix3_memory_editors_keep_separate_histories() {
+    let mut a = fixture();
+    let mut b = fixture();
+    personal_owned_choice(&mut a, "世事").confirm(true);
+    personal_owned_choice(&mut b, "逝世").confirm(true);
+    assert_eq!(count(&a, &[syl![SH, TONE4]; 2], "世事"), 1);
+    assert_eq!(count(&a, &[syl![SH, TONE4]; 2], "逝世"), 0);
+    assert_eq!(count(&b, &[syl![SH, TONE4]; 2], "世事"), 0);
+    assert_eq!(count(&b, &[syl![SH, TONE4]; 2], "逝世"), 1);
+}
